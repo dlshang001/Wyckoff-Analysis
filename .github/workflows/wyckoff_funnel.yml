@@ -14,6 +14,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
+      PYTHONUNBUFFERED: "1"
       FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
@@ -48,7 +49,9 @@ jobs:
         run: mkdir -p logs
 
       - name: Run daily job
-        run: python scripts/daily_job.py --logs ${{ github.workspace }}/logs/daily_job.log
+        run: |
+          python -u scripts/daily_job.py --logs ${{ github.workspace }}/logs/daily_job.log \
+            2>&1 | tee -a ${{ github.workspace }}/logs/daily_job.console.log
 
       - name: Upload artifacts
         if: always()
