@@ -43,6 +43,26 @@ STEP4_MAX_OUTPUT_TOKENS = 8192
 STEP4_ATR_PERIOD = int(os.getenv("STEP4_ATR_PERIOD", "14"))
 STEP4_ATR_MULTIPLIER = float(os.getenv("STEP4_ATR_MULTIPLIER", "2.0"))
 STEP4_MAX_WORKERS = int(os.getenv("STEP4_MAX_WORKERS", "8"))
+STEP4_FORCE_MAX_HOLD_EXIT = os.getenv("STEP4_FORCE_MAX_HOLD_EXIT", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+STEP4_MAX_HOLD_DAYS = max(int(os.getenv("STEP4_MAX_HOLD_DAYS", "5")), 1)
+STEP4_BUY_HARD_STOP_ENABLED = os.getenv("STEP4_BUY_HARD_STOP_ENABLED", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+STEP4_BUY_HARD_STOP_PCT = max(
+    float(os.getenv("STEP4_BUY_HARD_STOP_PCT", "9.0")),
+    0.0,
+)
+STEP4_BUY_STOP_MODE = os.getenv("STEP4_BUY_STOP_MODE", "fixed").strip().lower()
+if STEP4_BUY_STOP_MODE not in {"fixed", "floor"}:
+    STEP4_BUY_STOP_MODE = "fixed"
 STEP4_ENABLE_SPOT_PATCH = os.getenv("STEP4_ENABLE_SPOT_PATCH", "1").strip().lower() in {
     "1",
     "true",
@@ -52,6 +72,8 @@ STEP4_ENABLE_SPOT_PATCH = os.getenv("STEP4_ENABLE_SPOT_PATCH", "1").strip().lowe
 STEP4_SPOT_PATCH_RETRIES = int(os.getenv("STEP4_SPOT_PATCH_RETRIES", "2"))
 STEP4_SPOT_PATCH_SLEEP = float(os.getenv("STEP4_SPOT_PATCH_SLEEP", "0.3"))
 STEP4_ATR_SLIPPAGE_FACTOR = float(os.getenv("STEP4_ATR_SLIPPAGE_FACTOR", "0.25"))
+STEP4_PROBE_BUDGET_LIMIT = min(max(float(os.getenv("STEP4_PROBE_BUDGET_LIMIT", "0.10")), 0.0), 1.0)
+STEP4_ATTACK_BUDGET_LIMIT = min(max(float(os.getenv("STEP4_ATTACK_BUDGET_LIMIT", "0.20")), 0.0), 1.0)
 STEP4_BUY_BLOCK_REGIMES = {
     x.strip().upper()
     for x in os.getenv("STEP4_BUY_BLOCK_REGIMES", "CRASH,BLACK_SWAN").split(",")
@@ -127,8 +149,8 @@ class WyckoffOrderEngine:
         "ATTACK": 0.012,  # 1.2%
     }
     BUDGET_LIMITS = {
-        "PROBE": 0.08,    # 8%
-        "ATTACK": 0.25,   # 25%
+        "PROBE": STEP4_PROBE_BUDGET_LIMIT,
+        "ATTACK": STEP4_ATTACK_BUDGET_LIMIT,
     }
     PRIORITY_MAP = {
         "EXIT": 1,
@@ -230,6 +252,34 @@ class WyckoffOrderEngine:
                             f"atr_entry_tighten({effective_stop_loss:.2f}->{merged:.2f})"
                         )
                     effective_stop_loss = merged
+
+        # 实盘硬止损：买入动作不得放宽到 -STEP4_BUY_HARD_STOP_PCT 之外
+        # 仅约束 PROBE/ATTACK，不影响 HOLD/TRIM/EXIT 的存量跟踪止损逻辑。
+        if (
+            action in {"PROBE", "ATTACK"}
+            and STEP4_BUY_HARD_STOP_ENABLED
+            and STEP4_BUY_HARD_STOP_PCT > 0
+        ):
+            hard_stop = current_price * (1.0 - STEP4_BUY_HARD_STOP_PCT / 100.0)
+            if hard_stop > 0:
+                if STEP4_BUY_STOP_MODE == "fixed":
+                    prev_stop = effective_stop_loss
+                    effective_stop_loss = hard_stop
+                    if prev_stop is None:
+                        audit_parts.append(f"hard_stop_fixed_init({effective_stop_loss:.2f})")
+                    elif abs(prev_stop - hard_stop) >= 1e-6:
+                        audit_parts.append(
+                            f"hard_stop_fixed_override({prev_stop:.2f}->{hard_stop:.2f})"
+                        )
+                else:
+                    if effective_stop_loss is None:
+                        effective_stop_loss = hard_stop
+                        audit_parts.append(f"hard_stop_floor_init({effective_stop_loss:.2f})")
+                    elif effective_stop_loss < hard_stop:
+                        audit_parts.append(
+                            f"hard_stop_floor_raise({effective_stop_loss:.2f}->{hard_stop:.2f})"
+                        )
+                        effective_stop_loss = hard_stop
 
         if action == "EXIT":
             sell_shares = int(math.floor(max(held_shares, 0) / 100.0) * 100)
@@ -558,6 +608,32 @@ def _latest_trade_date_from_hist(df: pd.DataFrame) -> date | None:
     return s.iloc[-1].date()
 
 
+def _calc_holding_trade_days(
+    df: pd.DataFrame,
+    buy_dt: str,
+    end_trade_date: date,
+) -> int | None:
+    if df is None or df.empty or "date" not in df.columns:
+        return None
+    if not str(buy_dt or "").strip():
+        return None
+    buy_ts = pd.to_datetime(buy_dt, errors="coerce")
+    if pd.isna(buy_ts):
+        return None
+    buy_date = buy_ts.date()
+
+    dates = pd.to_datetime(df["date"], errors="coerce").dropna().dt.date.tolist()
+    if not dates:
+        return None
+    dates = sorted(set(d for d in dates if d <= end_trade_date))
+    if not dates:
+        return None
+    entry_trade_date = next((d for d in dates if d >= buy_date), None)
+    if entry_trade_date is None:
+        return None
+    return int(sum(1 for d in dates if d >= entry_trade_date))
+
+
 def _append_spot_bar_if_needed(
     code: str,
     df: pd.DataFrame,
@@ -683,7 +759,7 @@ def _extract_stock_codes(text: str) -> list[str]:
 def _process_one_position(
     pos: PositionItem,
     window,
-) -> tuple[str, str, float, float, float | None]:
+) -> tuple[str, str, float, float, float | None, int | None]:
     """
     处理单个持仓，返回：(meta_block, failure_msg, live_val, latest_close, atr14)
     用于并行化。
@@ -711,6 +787,7 @@ def _process_one_position(
         if latest_close is None:
             latest_close = float(df_qfq.iloc[-1]["close"])
             failure_msg = f"{pos.code}:real_close_fallback_to_qfq"
+        hold_trade_days = _calc_holding_trade_days(df_qfq, pos.buy_dt, window.end_trade_date)
 
         live_val = latest_close * max(pos.shares, 0)
         pnl_pct = 0.0
@@ -727,6 +804,7 @@ def _process_one_position(
             f"{stop_info}"
             f"- ATR{STEP4_ATR_PERIOD}: {(f'{atr14:.3f}' if atr14 is not None else '-')}\n"
             f"- 持仓股数: {pos.shares}\n"
+            f"- 持仓交易日: {(hold_trade_days if hold_trade_days is not None else '-')}\n"
             f"- 买入日期: {pos.buy_dt or '-'}\n"
             f"- 原始策略: {pos.strategy or '-'}\n"
         )
@@ -736,7 +814,7 @@ def _process_one_position(
             wyckoff_tag=pos.strategy or "持仓",
             df=df_qfq,
         )
-        return (meta + "\n" + payload, failure_msg, live_val, latest_close, atr14)
+        return (meta + "\n" + payload, failure_msg, live_val, latest_close, atr14, hold_trade_days)
     except Exception as e:
         latest_close = _fetch_latest_real_close(pos.code, window)
         if latest_close is not None:
@@ -748,28 +826,29 @@ def _process_one_position(
                 f"- 持仓股数: {pos.shares}\n"
                 "- 数据状态: 日线未齐，已降级为快照风控。\n"
             )
-            return (fallback_meta, f"{pos.code}:{e}", live_val, latest_close, None)
-        return ("", f"{pos.code}:{e}", 0.0, 0.0, None)
+            return (fallback_meta, f"{pos.code}:{e}", live_val, latest_close, None, None)
+        return ("", f"{pos.code}:{e}", 0.0, 0.0, None, None)
 
 
 def _format_position_payload(
     positions: list[PositionItem],
     window,
-) -> tuple[str, list[str], float, dict[str, float], dict[str, float]]:
+) -> tuple[str, list[str], float, dict[str, float], dict[str, float], dict[str, int]]:
     blocks: list[str] = []
     failures: list[str] = []
     live_value_sum = 0.0
     latest_close_map: dict[str, float] = {}
     atr_map: dict[str, float] = {}
+    hold_days_map: dict[str, int] = {}
 
     if not positions:
-        return ("", [], 0.0, {}, {})
+        return ("", [], 0.0, {}, {}, {})
 
     with ThreadPoolExecutor(max_workers=STEP4_MAX_WORKERS) as executor:
         futures = {executor.submit(_process_one_position, pos, window): pos for pos in positions}
         for future in as_completed(futures):
             pos = futures[future]
-            meta_block, fail_msg, val, close, atr = future.result()
+            meta_block, fail_msg, val, close, atr, hold_days = future.result()
             if fail_msg:
                 failures.append(fail_msg)
             if meta_block:
@@ -778,8 +857,10 @@ def _format_position_payload(
                 latest_close_map[pos.code] = close
                 if atr is not None:
                     atr_map[pos.code] = atr
+                if hold_days is not None:
+                    hold_days_map[pos.code] = int(hold_days)
 
-    return ("\n\n".join(blocks), failures, live_value_sum, latest_close_map, atr_map)
+    return ("\n\n".join(blocks), failures, live_value_sum, latest_close_map, atr_map, hold_days_map)
 
 
 def _extract_json_block(text: str) -> str:
@@ -907,6 +988,51 @@ def _parse_decisions(
             )
         )
     return (market_view, out, None)
+
+
+def _enforce_max_hold_exit(
+    decisions: list[DecisionItem],
+    positions: list[PositionItem],
+    hold_days_map: dict[str, int],
+) -> tuple[list[DecisionItem], int]:
+    if not STEP4_FORCE_MAX_HOLD_EXIT or STEP4_MAX_HOLD_DAYS < 1:
+        return (decisions, 0)
+
+    pos_map = {p.code: p for p in positions if p.shares >= 100}
+    if not pos_map:
+        return (decisions, 0)
+
+    out = list(decisions)
+    idx_map = {d.code: i for i, d in enumerate(out)}
+    forced = 0
+
+    for code, pos in pos_map.items():
+        hold_days = hold_days_map.get(code)
+        if hold_days is None or hold_days < STEP4_MAX_HOLD_DAYS:
+            continue
+
+        forced_decision = DecisionItem(
+            code=code,
+            name=pos.name or code,
+            action="EXIT",
+            entry_zone_min=None,
+            entry_zone_max=None,
+            stop_loss=pos.stop_loss,
+            trim_ratio=None,
+            tape_condition=f"max_hold_days>={STEP4_MAX_HOLD_DAYS}",
+            invalidate_condition="无",
+            is_add_on=True,
+            reason=f"硬规则触发：持仓满 {STEP4_MAX_HOLD_DAYS} 交易日强制清仓（当前={hold_days}）",
+            confidence=1.0,
+        )
+        if code in idx_map:
+            out[idx_map[code]] = forced_decision
+        else:
+            idx_map[code] = len(out)
+            out.append(forced_decision)
+        forced += 1
+
+    return (out, forced)
 
 
 def _dump_model_input(model: str, system_prompt: str, user_message: str, symbols: list[str]) -> None:
@@ -1132,7 +1258,14 @@ def run(
 
     end_day = _job_end_calendar_day()
     window = _resolve_trading_window(end_calendar_day=end_day, trading_days=TRADING_DAYS)
-    positions_payload, position_failures, live_value, latest_price_map, atr_map = _format_position_payload(
+    (
+        positions_payload,
+        position_failures,
+        live_value,
+        latest_price_map,
+        atr_map,
+        hold_days_map,
+    ) = _format_position_payload(
         portfolio.positions,
         window,
     )
@@ -1181,6 +1314,9 @@ def run(
         + f"total_equity={float(total_equity):.2f}\n"
         + f"position_count={len(portfolio.positions)}\n"
         + f"allowed_codes={','.join(sorted(allowed_codes))}\n\n"
+        + "[系统硬规则]\n"
+        + f"max_hold_days={STEP4_MAX_HOLD_DAYS} (到期强制 EXIT={int(STEP4_FORCE_MAX_HOLD_EXIT)})\n"
+        + f"buy_stop_mode={STEP4_BUY_STOP_MODE}, buy_stop_pct={STEP4_BUY_HARD_STOP_PCT:.1f}\n\n"
         + "[内部持仓量价切片]\n"
         + (positions_payload if positions_payload else "当前无持仓，仅现金。")
         + "\n\n[外部候选摘要]\n"
@@ -1238,6 +1374,16 @@ def run(
                 reason="模型未给出动作，系统默认 HOLD",
                 confidence=None,
             )
+        )
+
+    decisions, forced_exit_count = _enforce_max_hold_exit(
+        decisions=decisions,
+        positions=portfolio.positions,
+        hold_days_map=hold_days_map,
+    )
+    if forced_exit_count > 0:
+        print(
+            f"[step4] 强制持仓到期清仓: count={forced_exit_count}, max_hold_days={STEP4_MAX_HOLD_DAYS}"
         )
 
     # 补齐候选最新价

@@ -1,0 +1,105 @@
+name: Backtest Grid
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "回测起始日期 (YYYY-MM-DD)"
+        required: true
+        default: "2025-09-01"
+      end:
+        description: "回测结束日期 (YYYY-MM-DD)"
+        required: true
+        default: "2026-03-03"
+      top_n:
+        description: "每日选股 TopN"
+        required: true
+        default: "3"
+      board:
+        description: "股票池"
+        required: true
+        default: "all"
+      sample_size:
+        description: "股票池采样，0 表示全量"
+        required: true
+        default: "0"
+      trading_days:
+        description: "回看交易日数"
+        required: true
+        default: "500"
+      snapshot_dir:
+        description: "可选：本地快照目录（留空则在线取数）"
+        required: false
+        default: ""
+
+concurrency:
+  group: backtest-grid-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  grid:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hold_days: [5, 6, 7, 8]
+        stop_loss: [-6, -7, -8, -9]
+    env:
+      PYTHONUNBUFFERED: "1"
+      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+      TZ: Asia/Shanghai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run grid backtest cell
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOLD="${{ matrix.hold_days }}"
+          STOP="${{ matrix.stop_loss }}"
+          STOP_TAG="${STOP#-}"
+          OUT_DIR="analysis/backtest_grid_actions/h${HOLD}_sl${STOP_TAG}_tp0"
+          echo "OUT_DIR=${OUT_DIR}" >> "${GITHUB_ENV}"
+          mkdir -p "${OUT_DIR}"
+
+          SNAP_ARGS=()
+          if [ -n "${{ inputs.snapshot_dir }}" ]; then
+            SNAP_ARGS+=(--snapshot-dir "${{ inputs.snapshot_dir }}")
+          fi
+
+          python -u -m scripts.backtest_runner \
+            --start "${{ inputs.start }}" \
+            --end "${{ inputs.end }}" \
+            --hold-days "${HOLD}" \
+            --top-n "${{ inputs.top_n }}" \
+            --board "${{ inputs.board }}" \
+            --sample-size "${{ inputs.sample_size }}" \
+            --trading-days "${{ inputs.trading_days }}" \
+            --exit-mode sltp \
+            --stop-loss "${STOP}" \
+            --take-profit 0 \
+            --sltp-priority stop_first \
+            --output-dir "${OUT_DIR}" \
+            "${SNAP_ARGS[@]}" \
+            | tee "${OUT_DIR}/run.log"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-grid-h${{ matrix.hold_days }}-sl${{ matrix.stop_loss }}-${{ github.run_number }}
+          path: ${{ env.OUT_DIR }}/*
+          retention-days: 7
+          if-no-files-found: warn

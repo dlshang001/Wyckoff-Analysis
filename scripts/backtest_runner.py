@@ -27,6 +27,11 @@ from core.wyckoff_engine import FunnelConfig, normalize_hist_from_fetch, run_fun
 from integrations.data_source import fetch_index_hist, fetch_market_cap_map, fetch_sector_map, fetch_stock_hist
 from integrations.fetch_a_share_csv import get_stocks_by_board, _normalize_symbols
 
+DEFAULT_HOLD_DAYS = 5
+DEFAULT_EXIT_MODE = "sltp"
+DEFAULT_STOP_LOSS_PCT = -9.0
+DEFAULT_TAKE_PROFIT_PCT = 0.0
+
 
 @dataclass
 class TradeRecord:
@@ -291,9 +296,9 @@ def run_backtest(
     trading_days: int,
     max_workers: int,
     snapshot_dir: Path | None = None,
-    exit_mode: str = "close_only",
-    stop_loss_pct: float = -5.0,
-    take_profit_pct: float = 10.0,
+    exit_mode: str = DEFAULT_EXIT_MODE,
+    stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
+    take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT,
     sltp_priority: str = "stop_first",
 ) -> tuple[pd.DataFrame, dict]:
     if end_dt <= start_dt:
@@ -549,6 +554,7 @@ def run_backtest(
     }
     if not trades_df.empty:
         ret = pd.to_numeric(trades_df["ret_pct"], errors="coerce").dropna()
+        var95_ret_pct, cvar95_ret_pct = _calc_cvar95_pct(ret)
         summary.update(
             {
                 "win_rate_pct": float((ret > 0).mean() * 100.0),
@@ -556,6 +562,10 @@ def run_backtest(
                 "median_ret_pct": float(ret.median()),
                 "q25_ret_pct": float(ret.quantile(0.25)),
                 "q75_ret_pct": float(ret.quantile(0.75)),
+                "max_drawdown_pct": _calc_max_drawdown_pct(ret),
+                "var95_ret_pct": var95_ret_pct,
+                "cvar95_ret_pct": cvar95_ret_pct,
+                "max_consecutive_losses": _calc_max_consecutive_losses(ret),
             }
         )
     else:
@@ -566,6 +576,10 @@ def run_backtest(
                 "median_ret_pct": None,
                 "q25_ret_pct": None,
                 "q75_ret_pct": None,
+                "max_drawdown_pct": None,
+                "var95_ret_pct": None,
+                "cvar95_ret_pct": None,
+                "max_consecutive_losses": 0,
             }
         )
     return trades_df, summary
@@ -577,6 +591,44 @@ def _fmt_metric(v: float | int | str | None, ndigits: int = 3) -> str:
     if isinstance(v, float):
         return f"{v:.{ndigits}f}"
     return str(v)
+
+
+def _calc_max_drawdown_pct(ret: pd.Series) -> float | None:
+    s = pd.to_numeric(ret, errors="coerce").dropna()
+    if s.empty:
+        return None
+    nav = (1.0 + s / 100.0).cumprod()
+    peak = nav.cummax()
+    drawdown = nav / peak - 1.0
+    if drawdown.empty:
+        return None
+    return float(drawdown.min() * 100.0)
+
+
+def _calc_cvar95_pct(ret: pd.Series) -> tuple[float | None, float | None]:
+    s = pd.to_numeric(ret, errors="coerce").dropna()
+    if s.empty:
+        return None, None
+    var95 = float(s.quantile(0.05))
+    tail = s[s <= var95]
+    if tail.empty:
+        return var95, None
+    return var95, float(tail.mean())
+
+
+def _calc_max_consecutive_losses(ret: pd.Series) -> int:
+    s = pd.to_numeric(ret, errors="coerce").dropna()
+    if s.empty:
+        return 0
+    max_streak = 0
+    streak = 0
+    for v in s.tolist():
+        if float(v) < 0:
+            streak += 1
+            max_streak = max(max_streak, streak)
+        else:
+            streak = 0
+    return int(max_streak)
 
 
 def _build_summary_md(summary: dict) -> str:
@@ -603,6 +655,12 @@ def _build_summary_md(summary: dict) -> str:
             f"- 25%分位: {_fmt_metric(summary.get('q25_ret_pct'), 3)}%",
             f"- 75%分位: {_fmt_metric(summary.get('q75_ret_pct'), 3)}%",
             "",
+            "## 风险统计",
+            f"- 最大回撤(逐笔复利): {_fmt_metric(summary.get('max_drawdown_pct'), 3)}%",
+            f"- VaR95(单笔收益): {_fmt_metric(summary.get('var95_ret_pct'), 3)}%",
+            f"- CVaR95(最差5%%均值): {_fmt_metric(summary.get('cvar95_ret_pct'), 3)}%",
+            f"- 最长连续亏损笔数: {_fmt_metric(summary.get('max_consecutive_losses'), 0)}",
+            "",
             "## 说明",
             "- 该回测仅使用日线数据（qfq），不含盘口、滑点、涨跌停成交约束。",
             "- ⚠️ **注意 / Look-ahead Bias**: 市值和行业映射采用的是当前快照（未使用历史真实流通市值及退市剔除数据）。因此存在幸存者偏差与市值穿越，此回测数据仅作为参数方向与形态有效性的技术验证，不能完全代表真实历史表现。",
@@ -614,7 +672,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Wyckoff Funnel 日线轻量回测器")
     parser.add_argument("--start", required=True, help="起始日期: YYYY-MM-DD 或 YYYYMMDD")
     parser.add_argument("--end", required=True, help="结束日期: YYYY-MM-DD 或 YYYYMMDD")
-    parser.add_argument("--hold-days", type=int, default=5, help="持有交易日数 (default: 5)")
+    parser.add_argument(
+        "--hold-days",
+        type=int,
+        default=DEFAULT_HOLD_DAYS,
+        help=f"持有交易日数 (default: {DEFAULT_HOLD_DAYS})",
+    )
     parser.add_argument("--top-n", type=int, default=3, help="每日最多纳入交易样本的股票数 (default: 3)")
     parser.add_argument("--board", choices=["all", "main", "chinext"], default="all")
     parser.add_argument("--sample-size", type=int, default=300, help="股票池采样数量，0 表示不采样")
@@ -623,11 +686,21 @@ def main() -> int:
     parser.add_argument(
         "--exit-mode",
         choices=["close_only", "sltp"],
-        default="close_only",
-        help="离场模式：close_only=仅按持有天数收盘离场（默认，兼容旧口径）；sltp=启用日内止盈止损",
+        default=DEFAULT_EXIT_MODE,
+        help=f"离场模式：close_only=仅按持有天数收盘离场；sltp=启用日内止盈止损 (default: {DEFAULT_EXIT_MODE})",
     )
-    parser.add_argument("--stop-loss", type=float, default=-5.0, help="止损线(%%), 如 -5.0 表示跌破 5%% 止损. 0 表示不设止损")
-    parser.add_argument("--take-profit", type=float, default=10.0, help="止盈线(%%), 如 10.0 表示涨超 10%% 止盈. 0 表示不设止盈")
+    parser.add_argument(
+        "--stop-loss",
+        type=float,
+        default=DEFAULT_STOP_LOSS_PCT,
+        help=f"止损线(%%), 如 -9.0 表示跌破 9%% 止损. 0 表示不设止损 (default: {DEFAULT_STOP_LOSS_PCT})",
+    )
+    parser.add_argument(
+        "--take-profit",
+        type=float,
+        default=DEFAULT_TAKE_PROFIT_PCT,
+        help=f"止盈线(%%), 如 10.0 表示涨超 10%% 止盈. 0 表示不设止盈 (default: {DEFAULT_TAKE_PROFIT_PCT})",
+    )
     parser.add_argument(
         "--sltp-priority",
         choices=["stop_first", "take_first"],
