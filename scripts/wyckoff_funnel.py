@@ -871,7 +871,9 @@ def _rank_l3_candidates(
     return (ranked_symbols, score_map)
 
 
-def run_funnel_job() -> tuple[dict[str, list[tuple[str, float]]], dict]:
+def run_funnel_job(
+    include_debug_context: bool = False,
+) -> tuple[dict[str, list[tuple[str, float]]], dict]:
     """执行 Wyckoff Funnel，返回 (triggers, metrics)。"""
     cfg = FunnelConfig(trading_days=TRADING_DAYS)
     _apply_funnel_cfg_overrides(cfg)
@@ -1154,6 +1156,20 @@ def run_funnel_job() -> tuple[dict[str, list[tuple[str, float]]], dict]:
         "accum_stage_map": accum_stage_map,
         "exit_signals": exit_signals,
     }
+    if include_debug_context:
+        metrics["_debug"] = {
+            "cfg": cfg,
+            "end_trade_date": window.end_trade_date.isoformat(),
+            "all_symbols": all_symbols,
+            "name_map": name_map,
+            "market_cap_map": market_cap_map,
+            "sector_map": sector_map,
+            "bench_df": bench_df,
+            "all_df_map": all_df_map,
+            "layer1_symbols": l1_passed,
+            "layer2_symbols": l2_passed,
+            "layer3_symbols_raw": l3_passed,
+        }
     print(
         f"[funnel] L1={metrics['layer1']}, L2={metrics['layer2']}, "
         f"(主升={l2_momentum}, 潜伏={l2_ambush}, 吸筹={l2_accum}), "
