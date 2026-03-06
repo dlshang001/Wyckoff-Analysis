@@ -13,7 +13,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from uuid import uuid4
 
@@ -79,6 +79,14 @@ STEP4_BUY_BLOCK_REGIMES = {
     for x in os.getenv("STEP4_BUY_BLOCK_REGIMES", "CRASH,BLACK_SWAN").split(",")
     if x.strip() and x.strip().upper() != "COOLDOWN"
 }
+STEP4_CHASE_GAP_PCT_MIN = max(float(os.getenv("STEP4_CHASE_GAP_PCT_MIN", "1.2")), 0.2)
+STEP4_CHASE_GAP_PCT_MAX = max(float(os.getenv("STEP4_CHASE_GAP_PCT_MAX", "5.5")), STEP4_CHASE_GAP_PCT_MIN)
+STEP4_CHASE_ATR_MULT_MIN = max(float(os.getenv("STEP4_CHASE_ATR_MULT_MIN", "0.8")), 0.1)
+STEP4_CHASE_ATR_MULT_MAX = max(float(os.getenv("STEP4_CHASE_ATR_MULT_MAX", "2.4")), STEP4_CHASE_ATR_MULT_MIN)
+
+# --- 新增：OMS 防追高与滑点保护配置 ---
+STEP4_MAX_GAP_UP_PCT = float(os.getenv("STEP4_MAX_GAP_UP_PCT", "3.0"))          # 最大允许跳空/追高幅度(%)
+STEP4_MAX_GAP_UP_ATR_MULT = float(os.getenv("STEP4_MAX_GAP_UP_ATR_MULT", "1.5")) # 最大允许追高 ATR 倍数
 
 
 @dataclass
@@ -113,6 +121,10 @@ class DecisionItem:
     is_add_on: bool
     reason: str
     confidence: float | None
+    wyckoff_track: str = ""
+    wyckoff_stage: str = ""
+    wyckoff_tag: str = ""
+    source_type: str = ""
 
 
 @dataclass
@@ -136,6 +148,185 @@ class ExecutionTicket:
     effective_stop_loss: float | None
     slippage_bps: float
     audit: str
+    max_entry_price: float | None = None
+    chase_profile: str = ""
+    wyckoff_context: str = ""
+
+
+@dataclass(frozen=True)
+class CandidateMeta:
+    code: str
+    name: str
+    tag: str = ""
+    track: str = ""
+    stage: str = ""
+    source_type: str = ""
+
+
+def _clean_text(raw: object) -> str:
+    return str(raw or "").strip()
+
+
+def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    text_norm = text.lower()
+    for keyword in keywords:
+        if keyword.lower() in text_norm:
+            return True
+    return False
+
+
+def _normalize_track(raw: object) -> str:
+    text = _clean_text(raw)
+    text_norm = text.lower()
+    if text_norm == "trend":
+        return "Trend"
+    if text_norm == "accum":
+        return "Accum"
+    if _contains_keyword(text, ("markup", "trend", "主升", "点火", "sos", "突破")):
+        return "Trend"
+    if _contains_keyword(text, ("accum", "spring", "lps", "潜伏", "吸筹", "地量", "护盘")):
+        return "Accum"
+    return ""
+
+
+def _normalize_stage(raw: object) -> str:
+    text = _clean_text(raw)
+    text_norm = text.lower()
+    if "markup" in text_norm:
+        return "Markup"
+    for stage in ("Accum_A", "Accum_B", "Accum_C"):
+        if stage.lower() in text_norm:
+            return stage
+    return ""
+
+
+def _infer_track_from_text(raw: object) -> str:
+    return _normalize_track(raw)
+
+
+def _infer_stage_from_text(raw: object) -> str:
+    return _normalize_stage(raw)
+
+
+def _build_candidate_meta_map(
+    candidate_meta: list[dict] | None,
+    positions: list[PositionItem],
+) -> dict[str, CandidateMeta]:
+    meta_map: dict[str, CandidateMeta] = {}
+
+    for item in candidate_meta or []:
+        if not isinstance(item, dict):
+            continue
+        code = _clean_text(item.get("code"))
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        meta_map[code] = CandidateMeta(
+            code=code,
+            name=_clean_text(item.get("name")) or code,
+            tag=_clean_text(item.get("tag")),
+            track=_normalize_track(item.get("track")),
+            stage=_normalize_stage(item.get("stage")),
+            source_type="external",
+        )
+
+    for pos in positions:
+        existing = meta_map.get(pos.code)
+        strategy = _clean_text(pos.strategy)
+        meta_map[pos.code] = CandidateMeta(
+            code=pos.code,
+            name=pos.name or pos.code,
+            tag=(existing.tag if existing and existing.tag else strategy),
+            track=(existing.track if existing and existing.track else _infer_track_from_text(strategy)),
+            stage=(existing.stage if existing and existing.stage else _infer_stage_from_text(strategy)),
+            source_type="holding",
+        )
+
+    return meta_map
+
+
+def _attach_candidate_meta(
+    decisions: list[DecisionItem],
+    meta_map: dict[str, CandidateMeta],
+) -> list[DecisionItem]:
+    out: list[DecisionItem] = []
+    for dec in decisions:
+        meta = meta_map.get(dec.code)
+        if not meta:
+            out.append(dec)
+            continue
+        out.append(
+            replace(
+                dec,
+                wyckoff_track=meta.track or dec.wyckoff_track,
+                wyckoff_stage=meta.stage or dec.wyckoff_stage,
+                wyckoff_tag=meta.tag or dec.wyckoff_tag,
+                source_type=meta.source_type or dec.source_type,
+            )
+        )
+    return out
+
+
+def _format_wyckoff_context(track: str, stage: str, tag: str) -> str:
+    parts = [x for x in [_clean_text(track), _clean_text(stage), _clean_text(tag)] if x]
+    return " | ".join(parts)
+
+
+def _resolve_chase_limits(dec: DecisionItem, market_regime: str) -> tuple[float, float, str, str]:
+    regime = _clean_text(market_regime).upper() or "NEUTRAL"
+    track = _normalize_track(dec.wyckoff_track) or _infer_track_from_text(dec.wyckoff_tag)
+    stage = _normalize_stage(dec.wyckoff_stage) or _infer_stage_from_text(dec.wyckoff_tag)
+    tag = _clean_text(dec.wyckoff_tag)
+
+    pct_limit = float(max(STEP4_MAX_GAP_UP_PCT, 0.0))
+    atr_limit = float(max(STEP4_MAX_GAP_UP_ATR_MULT, 0.0))
+    profile_parts = [regime]
+
+    regime_mult = {
+        "RISK_ON": 1.10,
+        "NEUTRAL": 1.00,
+        "PANIC_REPAIR": 0.95,
+        "RISK_OFF": 0.85,
+        "CRASH": 0.70,
+        "BLACK_SWAN": 0.60,
+    }.get(regime, 1.00)
+    pct_limit *= regime_mult
+    atr_limit *= regime_mult
+
+    if track == "Trend":
+        pct_limit *= 1.12
+        atr_limit *= 1.12
+        profile_parts.append("Trend")
+    elif track == "Accum":
+        pct_limit *= 0.82
+        atr_limit *= 0.82
+        profile_parts.append("Accum")
+    else:
+        profile_parts.append("Unclassified")
+
+    if stage == "Markup" or _contains_keyword(tag, ("sos", "点火", "突破", "主升")):
+        pct_limit *= 1.10
+        atr_limit *= 1.15
+        profile_parts.append("Momentum")
+    elif stage == "Accum_C" or _contains_keyword(tag, ("spring", "lps", "终极震仓", "缩量回踩")):
+        pct_limit *= 0.90
+        atr_limit *= 0.90
+        profile_parts.append("Trigger")
+    elif stage in {"Accum_A", "Accum_B"}:
+        pct_limit *= 0.82
+        atr_limit *= 0.85
+        profile_parts.append(stage)
+    elif stage:
+        profile_parts.append(stage)
+
+    if dec.is_add_on:
+        pct_limit *= 0.95
+        atr_limit *= 0.95
+        profile_parts.append("AddOn")
+
+    pct_limit = min(max(pct_limit, STEP4_CHASE_GAP_PCT_MIN), STEP4_CHASE_GAP_PCT_MAX)
+    atr_limit = min(max(atr_limit, STEP4_CHASE_ATR_MULT_MIN), STEP4_CHASE_ATR_MULT_MAX)
+    context = _format_wyckoff_context(track, stage, tag)
+    return (pct_limit, atr_limit, "/".join(profile_parts), context)
 
 
 class WyckoffOrderEngine:
@@ -422,6 +613,31 @@ class WyckoffOrderEngine:
                     reason=f"加仓条件不满足（当前未浮盈），降级为 HOLD；原建议: {dec.reason}",
                 )
 
+        # =========================================================
+        # 🛡️ 新增：防跳空、防追高物理拦截 (Anti-Chase Protection)
+        # 优化后：记录参数到 ExecutionTicket 以供明天交易作为 limit_price 参考。不再拒绝订单。
+        # =========================================================
+        max_entry_price = None
+        chase_profile = ""
+        wyckoff_context = _format_wyckoff_context(dec.wyckoff_track, dec.wyckoff_stage, dec.wyckoff_tag)
+        if action in {"PROBE", "ATTACK"}:
+            gap_pct_limit, atr_mult_limit, chase_profile, wyckoff_context = _resolve_chase_limits(
+                dec,
+                self.market_regime,
+            )
+            limit_by_pct = current_price * (1.0 + gap_pct_limit / 100.0)
+            limit_by_atr = float("inf")
+            if atr14 is not None and atr14 > 0:
+                limit_by_atr = current_price + (atr_mult_limit * atr14)
+            limit_by_ai = dec.entry_zone_max if dec.entry_zone_max is not None else float("inf")
+
+            max_entry_price = min(limit_by_pct, limit_by_atr, limit_by_ai)
+            audit_parts.append(f"chase_profile={chase_profile}")
+            audit_parts.append(f"gap_limit_pct={gap_pct_limit:.2f}")
+            audit_parts.append(f"atr_limit_mult={atr_mult_limit:.2f}")
+            audit_parts.append(f"T+1_max_entry_price={max_entry_price:.2f}")
+        # =========================================================
+
         price_for_calc = current_price
         if dec.entry_zone_min is not None and dec.entry_zone_max is not None:
             if dec.entry_zone_min <= 0 or dec.entry_zone_max <= 0:
@@ -524,6 +740,9 @@ class WyckoffOrderEngine:
                     "buy_with_slippage",
                 ]
             ),
+            max_entry_price=max_entry_price,
+            chase_profile=chase_profile,
+            wyckoff_context=wyckoff_context,
         )
 
     def _no_trade(self, dec: DecisionItem, name: str, reason: str) -> ExecutionTicket:
@@ -1221,6 +1440,14 @@ def _render_trade_ticket(
                 f"  下单：{t.shares} 股 | 占用：{t.amount:.2f} 元 | 参考价："
                 f"{('-' if t.price_hint is None else f'{t.price_hint:.2f}')}"
             )
+            if t.chase_profile:
+                lines.append(f"  分层：{t.chase_profile}")
+            if t.wyckoff_context:
+                lines.append(f"  结构：{t.wyckoff_context}")
+            # ---> 新增这一行红色高亮提示 <---
+            if t.max_entry_price is not None:
+                lines.append(f"  🛑 【防追高限价】明日开盘价若 > {t.max_entry_price:.2f} 元，请放弃买入！")
+
             lines.append(
                 f"  风险：止损 {_fmt_stop(t.stop_loss)} | 最大回撤 {t.max_loss:.2f} 元 ({t.drawdown_ratio * 100:.2f}%)"
                 f" | 滑点={t.slippage_bps * 100:.2f}%"
@@ -1257,6 +1484,7 @@ def run(
     api_key: str,
     model: str,
     *,
+    candidate_meta: list[dict] | None = None,
     portfolio_id: str,
     tg_bot_token: str,
     tg_chat_id: str,
@@ -1310,7 +1538,11 @@ def run(
     external_codes = _extract_stock_codes(external_report)
     candidate_codes = [c for c in external_codes if c not in set(position_codes)]
     allowed_codes = set(position_codes + candidate_codes)
+    candidate_meta_map = _build_candidate_meta_map(candidate_meta, portfolio.positions)
     name_map = {p.code: p.name for p in portfolio.positions}
+    for code, meta in candidate_meta_map.items():
+        if code in allowed_codes and code not in name_map:
+            name_map[code] = meta.name or code
 
     benchmark_text = ""
     market_regime = "NEUTRAL"
@@ -1407,6 +1639,7 @@ def run(
         positions=portfolio.positions,
         hold_days_map=hold_days_map,
     )
+    decisions = _attach_candidate_meta(decisions, candidate_meta_map)
     if forced_exit_count > 0:
         print(
             f"[step4] 强制持仓到期清仓: count={forced_exit_count}, max_hold_days={STEP4_MAX_HOLD_DAYS}"

@@ -257,7 +257,7 @@ with content_col:
                 # 由于之前的 funnel 没有把完整的 row 存到 session，我们在这动态生成。
                 fg_list = st.session_state.get("ai_find_gold_result") or []
                 score_map = {code: score for code, score in fg_list}
-                
+
                 parts: list[str] = []
                 for symbol in symbols:
                     try:
@@ -346,3 +346,12 @@ with content_col:
 
         st.subheader("📄 深度研报")
         st.markdown(report_text)
+
+        # --- 新增飞书推送 ---
+        if st.session_state.feishu_webhook:
+            try:
+                from utils.feishu import send_feishu_notification
+                title = "AI 深度研报 (网页端批量分析)" if analysis_type != "single_stock" else "AI 深度研报 (网页端单股)"
+                send_feishu_notification(st.session_state.feishu_webhook, title, report_text)
+            except Exception as e:
+                st.toast(f"飞书推送失败: {e}", icon="⚠️")

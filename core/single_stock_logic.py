@@ -358,6 +358,16 @@ def _run_analysis(symbol, image_file, provider, model, api_key):
         st.markdown("### 📝 威科夫大师研报")
         st.markdown(response_text)
 
+        # --- 新增飞书推送 ---
+        if st.session_state.feishu_webhook:
+            try:
+                from utils.feishu import send_feishu_notification
+                send_feishu_notification(st.session_state.feishu_webhook, f"AI 深度研报 (单股 - {symbol})", response_text)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                st.toast(f"飞书推送失败: {e}", icon="⚠️")
+
         # 4. 执行绘图代码
         if code_block:
             st.markdown("### 📊 结构标注图")

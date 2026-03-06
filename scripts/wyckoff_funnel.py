@@ -1246,6 +1246,16 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
         return {x.strip() for x in raw.split("+") if x.strip()}
 
     hit_set = set(sorted_codes)
+    sos_hit_set = set(str(c).strip() for c, _ in triggers.get("sos", []))
+    spring_hit_set = set(str(c).strip() for c, _ in triggers.get("spring", []))
+    lps_hit_set = set(str(c).strip() for c, _ in triggers.get("lps", []))
+    evr_hit_set = set(str(c).strip() for c, _ in triggers.get("evr", []))
+
+    def _stage_name(code: str) -> str:
+        if code in markup_symbols:
+            return "Markup"
+        return str(accum_stage_map.get(code, "") or "").strip()
+
     hit_selected_count = sum(1 for c in selected_for_ai if c in hit_set)
     l3_only_count = len(selected_for_ai) - hit_selected_count
     trend_hit_selected = sum(1 for c in trend_selected if c in hit_set)
@@ -1278,9 +1288,6 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
     accum_a_count = sum(1 for v in accum_stage_map.values() if v == "Accum_A")
     accum_b_count = sum(1 for v in accum_stage_map.values() if v == "Accum_B")
     accum_c_count = sum(1 for v in accum_stage_map.values() if v == "Accum_C")
-    profit_target_count = sum(
-        1 for sig in exit_signals.values() if sig.get("signal") == "profit_target"
-    )
     stop_loss_count = sum(
         1 for sig in exit_signals.values() if sig.get("signal") == "stop_loss"
     )
@@ -1384,8 +1391,8 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
         f"- **EVR（放量不跌）**：{len(evr_hit_set)}",
         "",
         "## 风控与 AI 筛后",
-        f"- **Exit 信号**：止盈{profit_target_count} | 止损{stop_loss_count} | Distribution警告{dist_warning_count}",
-        f"- **硬剔除**：{len(blocked_exit_codes)} 只（已触发止损或派发警告，不再送入 AI）",
+        f"- **Exit 参考信号**：结构止损{stop_loss_count} | Distribution警告{dist_warning_count}",
+        f"- **硬剔除**：{len(blocked_exit_codes)} 只（已触发结构止损或派发警告，不再送入 AI）",
         (
             f"- **最终送 AI**：{len(selected_for_ai)} 只"
             f"（{regime} 配额：Trend={trend_quota} / Accum={accum_quota} / 总上限={total_cap}）"
@@ -1405,7 +1412,7 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
                 "",
                 section_title,
                 f"- **说明**：{section_desc}",
-                "- **字段**：代码 名称 | 阶段 | 来源标签 | Exit信号 | 分值",
+                "- **字段**：代码 名称 | 阶段 | 来源标签 | 风控提示 | 分值",
                 "",
             ]
         )
@@ -1425,9 +1432,7 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
 
             exit_sig = exit_signals.get(code, {})
             exit_str = ""
-            if exit_sig.get("signal") == "profit_target":
-                exit_str = f"| ✓止盈{exit_sig.get('price', 0):.2f}"
-            elif exit_sig.get("signal") == "stop_loss":
+            if exit_sig.get("signal") == "stop_loss":
                 exit_str = f"| ✗止损{exit_sig.get('price', 0):.2f}"
             elif exit_sig.get("signal") == "distribution_warning":
                 exit_str = "| ⚠Distribution警告"

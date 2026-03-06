@@ -32,17 +32,19 @@ def normalize_hist_from_fetch(df: pd.DataFrame) -> pd.DataFrame:
         "成交量": "volume",
         "成交额": "amount",
         "涨跌幅": "pct_chg",
+        "换手率": "turnover",  # <--- 新增这行，捕获换手率
+        "换手": "turnover"     # <--- 兼容不同数据源的命名
     }
     out = df.rename(columns=col_map)
     keep = [
         c
-        for c in ["date", "open", "high", "low", "close", "volume", "amount", "pct_chg"]
+        for c in ["date", "open", "high", "low", "close", "volume", "amount", "pct_chg", "turnover"]
         if c in out.columns
     ]
     out = out[keep].copy()
     if "pct_chg" not in out.columns and "close" in out.columns:
         out["pct_chg"] = out["close"].astype(float).pct_change() * 100
-    for col in ["open", "high", "low", "close", "volume", "amount", "pct_chg"]:
+    for col in ["open", "high", "low", "close", "volume", "amount", "pct_chg", "turnover"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
     return out
@@ -150,6 +152,9 @@ class FunnelConfig:
     spring_vol_ratio: float = 1.0
     spring_tr_max_range_pct: float = 30.0
     spring_tr_max_drift_pct: float = 12.0
+    # Spring 动态振幅
+    spring_tr_atr_window: int = 20           # 计算 ATR 的历史窗口
+    spring_tr_atr_max_multiple: float = 4.0  # 区间最大允许振幅为 ATR_pct 的 N 倍(替代固定的30%)
 
     # Layer 4 - LPS
     lps_lookback: int = 3
@@ -162,6 +167,7 @@ class FunnelConfig:
     enable_evr_trigger: bool = True
     evr_lookback: int = 3
     evr_vol_ratio: float = 1.6
+    evr_min_turnover: float = 1.0  # 保守过滤：剔除死水微量放大，不对大票一刀切
     evr_vol_window: int = 20
     evr_max_drop: float = 2.0
     evr_max_bias_200: float = 40.0
@@ -174,6 +180,9 @@ class FunnelConfig:
     sos_vol_window: int = 20  # 计算点火爆量时的参考窗口
     sos_breakout_window: int = 20  # 要求突破或接近近 N 日的高点
     sos_max_bias_200: float = 40.0  # 防止在极高位将 Buying Climax 误判为 SOS
+    # SOS 动态极值爆量
+    sos_vol_quantile_window: int = 60        # 计算量能分位数的滚动窗口
+    sos_vol_quantile: float = 0.95           # 要求当日量能突破历史 N 日的 95% 分位数
 
     # Markup 阶段识别（Layer 2.5）
     enable_markup_detection: bool = True
@@ -188,9 +197,10 @@ class FunnelConfig:
 
     # Exit 策略（Layer 5）
     enable_exit_signals: bool = True
-    # 获利目标：从 Accumulation 低点计算
-    exit_profit_target_pct: float = 50.0  # 目标涨幅（%）
-    exit_stop_loss_pct: float = -8.0  # 风险控制止损幅度（%）
+    exit_stop_loss_pct: float = -8.0          # 初始底线防守：跌破建仓底部的幅度（%）
+    exit_trailing_active_pct: float = 15.0    # 利润激活线：从底部上涨超过此比例，激活移动跟踪止损
+    exit_trailing_drawdown_pct: float = -10.0 # 利润保护线：高位跟踪回撤止损幅度（%）
+
     # Distribution 识别：高位缩量警告
     dist_high_threshold_pct: float = 30.0  # 相对 MA200 的高度（%）
     dist_vol_dry_ratio: float = 0.5  # 高位缩量比
@@ -206,7 +216,7 @@ class FunnelResult(NamedTuple):
     # 新增：威科夫阶段细节
     stage_map: dict[str, str]  # code -> stage_name（如 "Accumulation A"、"Markup"、"Distribution"）
     markup_symbols: list[str]  # 已进入 Markup 的股票
-    exit_signals: dict[str, dict]  # code -> {"signal": "profit_target|stop_loss", "price": xxx, "reason": xxx}
+    exit_signals: dict[str, dict]  # code -> {"signal": "stop_loss|distribution_warning", "price": xxx, "reason": xxx}
     channel_map: dict[str, str]
 
 
@@ -592,7 +602,7 @@ def layer2_strength_detailed(
                 labels.append("暗中护盘")
             if sos_ok:
                 labels.append("点火破局")
-                
+
             if not labels:
                 labels.append("点火破局")
             channel_map[sym] = "+".join(labels)
@@ -737,7 +747,7 @@ def layer3_sector_resonance(
     top_sectors = (
         keep_sectors_sorted[:top_n] if top_n > 0 else keep_sectors_sorted
     )
-    
+
     # 威科夫重个股量价、轻板块。为了避免把底部尚未形成板块效应的吸筹股、潜伏股错杀，
     # L3 板块共振不再做硬性拦截（不剔除股票），只作特征打标签和 Top 行业计算输出。
     filtered = symbols
@@ -749,9 +759,10 @@ def layer3_sector_resonance(
 # Layer 4: 威科夫狙击
 
 
-def _is_trading_range_context(zone: pd.DataFrame, cfg: FunnelConfig) -> bool:
+def _is_trading_range_context(zone: pd.DataFrame, cfg: FunnelConfig, df_full: pd.DataFrame = None) -> bool:
     """
-    Spring 必须先发生在可接受的交易区间（TR）内，避免单边下跌中的假 Spring。
+    Spring 必须先发生在可接受的交易区间（TR）内。
+    使用 ATR_pct 动态计算可接受的合理振幅。
     """
     if zone is None or zone.empty:
         return False
@@ -766,7 +777,31 @@ def _is_trading_range_context(zone: pd.DataFrame, cfg: FunnelConfig) -> bool:
     if low_min <= 0:
         return False
     range_pct = (high_max - low_min) / low_min * 100.0
-    if range_pct > cfg.spring_tr_max_range_pct:
+
+    # --- 动态 ATR 振幅阈值计算 ---
+    max_allowed_range_pct = cfg.spring_tr_max_range_pct  # 兜底默认值 30.0
+    if df_full is not None and len(df_full) > getattr(cfg, "spring_tr_atr_window", 20):
+        h = pd.to_numeric(df_full["high"], errors="coerce")
+        l = pd.to_numeric(df_full["low"], errors="coerce")
+        c = pd.to_numeric(df_full["close"], errors="coerce")
+        prev_c = c.shift(1)
+
+        # 真实波动幅度 True Range
+        tr1 = h - l
+        tr2 = (h - prev_c).abs()
+        tr3 = (l - prev_c).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(getattr(cfg, "spring_tr_atr_window", 20)).mean()
+
+        last_atr = float(atr.iloc[-1])
+        last_c = float(c.iloc[-1])
+        if pd.notna(last_atr) and pd.notna(last_c) and last_c > 0:
+            atr_pct = (last_atr / last_c) * 100.0
+            max_allowed_range_pct = atr_pct * getattr(cfg, "spring_tr_atr_max_multiple", 4.0)
+            # 加一层硬风控：振幅哪怕放宽，最高不能超过45%，最低不低于15%
+            max_allowed_range_pct = min(max(max_allowed_range_pct, 15.0), 45.0)
+
+    if range_pct > max_allowed_range_pct:
         return False
 
     c_start = float(close.iloc[0])
@@ -788,7 +823,8 @@ def _detect_spring(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
         return None
     df_s = _sorted_if_needed(df)
     support_zone = df_s.iloc[-(cfg.spring_support_window + 1) : -1]
-    if not _is_trading_range_context(support_zone, cfg):
+    # 调用时把历史前序 df_full 传进去计算 ATR
+    if not _is_trading_range_context(support_zone, cfg, df_full=df_s.iloc[:-1]):
         return None
     support_level = support_zone["close"].min()
     prev = df_s.iloc[-2]
@@ -889,6 +925,13 @@ def _detect_evr(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
         if float(day_pct) < -cfg.evr_max_drop or float(day_pct) > 3.0:
             continue
 
+        # 换手率过滤：剔除全天死水里的相对放量假象，但阈值保持保守。
+        if "turnover" in df_s.columns and float(cfg.evr_min_turnover) > 0:
+            turnover_series = pd.to_numeric(df_s["turnover"], errors="coerce")
+            day_turnover = turnover_series.iloc[idx]
+            if pd.notna(day_turnover) and float(day_turnover) < float(cfg.evr_min_turnover):
+                continue
+
         # 结构约束：最新收盘不能明显弱于三天前（防止下跌中继）
         if len(close) >= 4:
             close_3d_ago = close.iloc[-4]
@@ -927,20 +970,20 @@ def _detect_sos(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
         # Fallback to a smaller necessary length if 200 is too strict, but MA200 needs 200 days
         # We handle MA200 dynamically inside
         pass
-        
+
     if len(df) < max(cfg.sos_vol_window, cfg.sos_breakout_window) + 2:
         return None
 
     df_s = _sorted_if_needed(df)
-    
+
     close = pd.to_numeric(df_s["close"], errors="coerce")
     volume = pd.to_numeric(df_s["volume"], errors="coerce")
     pct_chg = pd.to_numeric(df_s["pct_chg"], errors="coerce")
     high = pd.to_numeric(df_s["high"], errors="coerce")
-    
+
     if close.isna().all() or volume.isna().all() or pct_chg.isna().all():
         return None
-        
+
     # 位阶保护：高位爆量很大可能是 Buying Climax（派发），排除极大乖离
     close_last = close.iloc[-1]
     if len(close) >= 200:
@@ -950,40 +993,61 @@ def _detect_sos(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
             bias_200 = (float(close_last) - float(ma200_last)) / float(ma200_last) * 100.0
             if bias_200 > float(cfg.sos_max_bias_200):
                 return None
-            
+
     # 只看当天（威科夫点火通常是当天的明显大阳线）
     day_pct = float(pct_chg.iloc[-1])
     if pd.isna(day_pct) or day_pct < cfg.sos_pct_min:
         return None
-        
-    # 量能要求：暴击量
-    vol_ref = volume.tail(cfg.sos_vol_window + 1).iloc[:-1]
-    vol_ref_avg = float(vol_ref.mean()) if not vol_ref.empty else 0.0
+
+    # === 替换 _detect_sos 中的量能判断逻辑 ===
+
+    # 量能要求：暴击量 (由绝对比例 2.0 改为滚动分位数极值验证)
+    vol_window = getattr(cfg, "sos_vol_quantile_window", 60)
+    vol_ref = volume.tail(vol_window + 1).iloc[:-1]
+
+    if vol_ref.empty:
+        return None
+
+    vol_ref_avg = float(vol_ref.mean())
     if vol_ref_avg <= 0:
         return None
+
     vol_ratio = float(volume.iloc[-1]) / vol_ref_avg
-    if vol_ratio < cfg.sos_vol_ratio:
-        return None
-        
+
+    # 引入分位数检测
+    target_quantile = getattr(cfg, "sos_vol_quantile", 0.95)
+    valid_vol_ref = vol_ref.replace(0, pd.NA).dropna()
+
+    if len(valid_vol_ref) < 20:
+        # 样本天数不够，回退到基础倍数判断
+        if vol_ratio < cfg.sos_vol_ratio:
+            return None
+    else:
+        # 要求当天的量必须突破过去一段时间的极值分位（比如 95%）
+        import numpy as np
+        quantile_threshold = float(np.quantile(valid_vol_ref.values, target_quantile))
+        if float(volume.iloc[-1]) < quantile_threshold:
+            return None
+
     # 结构突破要求：创N日新高，或强势穿透季线/半年线
     ma50 = close.rolling(50).mean()
     ma50_last = ma50.iloc[-1] if not ma50.empty else None
-    
+
     recent_highs = high.tail(cfg.sos_breakout_window + 1).iloc[:-1]
     max_recent_high = float(recent_highs.max()) if not recent_highs.empty else float("inf")
-    
+
     # 接近或突破近期高点 (容差2%)
-    is_breakout = float(close_last) >= max_recent_high * 0.98  
-    
+    is_breakout = float(close_last) >= max_recent_high * 0.98
+
     is_ma_crossover = False
     if ma50_last is not None and pd.notna(ma50_last):
         prev_close = float(close.iloc[-2])
         if prev_close <= float(ma50_last) and float(close_last) > float(ma50_last):
             is_ma_crossover = True
-            
+
     if not (is_breakout or is_ma_crossover):
         return None
-        
+
     return vol_ratio
 
 
@@ -1235,17 +1299,6 @@ def detect_accum_stage(
 # Layer 5: Exit 策略
 
 
-def _detect_profit_target(
-    df: pd.DataFrame, accum_base_low: float, cfg: FunnelConfig
-) -> float | None:
-    """
-    从 Accumulation 底部向上计算目标位。
-    返回建议止盈价格或 None。
-    """
-    target_pct = cfg.exit_profit_target_pct / 100.0
-    return accum_base_low * (1.0 + target_pct)
-
-
 def _detect_distribution_start(df: pd.DataFrame, cfg: FunnelConfig) -> bool:
     """
     Distribution 阶段识别：高位缩量警告。
@@ -1292,6 +1345,7 @@ def layer5_exit_signals(
 ) -> dict[str, dict]:
     """
     为 Accumulation 和 Markup 阶段股票生成静态参考 Exit 信号（实际实盘止损在 OMS 中独立维护）。
+    统一采用：初始底线止损 + 动态跟踪止损(Trailing Stop) + 派发预警，让利润奔跑。
     返回 {symbol: {signal: ..., price: ..., reason: ...}}
     """
     if not cfg.enable_exit_signals:
@@ -1315,54 +1369,60 @@ def layer5_exit_signals(
         last_close = float(close.iloc[-1])
         stage = accum_stage_map.get(sym, "Markup") # 默认按主升处理
 
-        profit_target = None
         stop_loss_price = None
+        stop_reason = ""
+
+        # 获取 MA50 作为动态生命线
+        ma_short_series = close.rolling(cfg.ma_short).mean()
+        ma_short = float(ma_short_series.iloc[-1]) if not ma_short_series.isna().all() else None
+        # 获取近期 60 日最高点
+        recent_high = float(high.tail(60).max())
 
         if stage.startswith("Accum_"):
-            # 对于吸筹股，锚定“年内最低点”
+            # 对于吸筹股，锚定“年内最低点”作为原始护城河
             lookback_w = max(int(cfg.accum_lookback_days), 2)
             accum_low = float(low.tail(lookback_w).min())
-            
-            # 止盈目标
-            profit_target = _detect_profit_target(df_s, accum_low, cfg)
-            # 止损：底部跌破 8%
-            stop_loss_price = accum_low * (1.0 + cfg.exit_stop_loss_pct / 100.0)
-        else:
-            # 对于 Markup 强势主升股，锚定“近期高点”向下计算跟踪止损 或 跌破 MA50
-            # 避免使用一年前的水下最低价
-            ma_short = close.rolling(cfg.ma_short).mean().iloc[-1]
-            recent_high = float(high.tail(60).max())
-            if not pd.isna(ma_short):
-                # 以 MA50 和 近期高点回撤较大者作为跟踪止损
-                stop_loss_price = max(float(ma_short) * 0.98, recent_high * (1.0 + cfg.exit_stop_loss_pct / 100.0))
+
+            # 判断是否已经脱离底部成本区，激活移动跟踪止损
+            trailing_active_pct = getattr(cfg, "exit_trailing_active_pct", 15.0) / 100.0
+            if last_close >= accum_low * (1.0 + trailing_active_pct):
+                # 已经大幅盈利，转换为跟踪防守（近期高点回撤 或 MA50，取最高值作为底线）
+                drawdown_pct = getattr(cfg, "exit_trailing_drawdown_pct", -10.0) / 100.0
+                trailing_price = recent_high * (1.0 + drawdown_pct)
+                if ma_short is not None:
+                    stop_loss_price = max(trailing_price, float(ma_short) * 0.98) # MA50 容差2%
+                else:
+                    stop_loss_price = trailing_price
+                stop_reason = "已脱离底部，触发利润保护(动态跟踪止损)"
             else:
-                stop_loss_price = recent_high * (1.0 + cfg.exit_stop_loss_pct / 100.0)
-            
-            # 主升股通常不设硬止盈目标（让利润奔跑直到跌破跟踪止损），此处设为 None 或很高
+                # 还在底部摩擦，执行严格的跌破成本区止损
+                stop_loss_price = accum_low * (1.0 + cfg.exit_stop_loss_pct / 100.0)
+                stop_reason = f"破位防守(跌破 {stage} 吸筹底线)"
+        else:
+            # 对于 Markup 强势主升股，直接采用高位跟踪止损
+            drawdown_pct = getattr(cfg, "exit_trailing_drawdown_pct", -10.0) / 100.0
+            trailing_price = recent_high * (1.0 + drawdown_pct)
+            if ma_short is not None:
+                stop_loss_price = max(trailing_price, float(ma_short) * 0.98)
+            else:
+                stop_loss_price = trailing_price
+            stop_reason = "主升趋势破位(跌破MA50或高位回撤)"
 
-        if profit_target is not None and last_close >= profit_target:
-            signals[sym] = {
-                "signal": "profit_target",
-                "price": profit_target,
-                "current": last_close,
-                "reason": f"已达估测底部利润目标（+{cfg.exit_profit_target_pct:.0f}%）",
-            }
-            continue
-
+        # 1. 检查是否触发止损/跟踪止损
         if stop_loss_price is not None and last_close <= stop_loss_price:
             signals[sym] = {
                 "signal": "stop_loss",
                 "price": stop_loss_price,
                 "current": last_close,
-                "reason": f"破位防守（{stage}）",
+                "reason": stop_reason,
             }
             continue
 
-        # Distribution 警告 (主要针对高位股)
+        # 2. 检查是否有 Distribution (派发) 警告 (高位放量滞涨或缩量)
         if _detect_distribution_start(df_s, cfg):
             signals[sym] = {
                 "signal": "distribution_warning",
-                "reason": "检测到高位 Distribution 阶段迹象（放量不涨/高位缩量）",
+                "reason": "检测到高位 Distribution 阶段迹象（放量不涨/高位缩量），主力疑似派发",
             }
 
     return signals
@@ -1500,7 +1560,7 @@ def allocate_ai_candidates(
     def _calc_priority_score(code: str, is_trend_side: bool) -> float:
         score = 0.0
         stage_name = _stage_name(code)
-        
+
         if code in result.markup_symbols:
             score += 100.0
         if stage_name == "Accum_C":
@@ -1522,9 +1582,7 @@ def allocate_ai_candidates(
             score += 10.0
 
         exit_sig = result.exit_signals.get(code, {})
-        if exit_sig.get("signal") == "profit_target":
-            score -= 30.0
-        elif exit_sig.get("signal") == "stop_loss":
+        if exit_sig.get("signal") == "stop_loss":
             score -= 100.0
         elif exit_sig.get("signal") == "distribution_warning":
             score -= 20.0

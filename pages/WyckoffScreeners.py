@@ -257,6 +257,45 @@ with content_col:
             "sector_map": sector_map,
         }
 
+        # --- 新增飞书推送 ---
+        if st.session_state.feishu_webhook:
+            webhook_url = st.session_state.feishu_webhook
+            try:
+                from utils.feishu import send_feishu_notification
+                l4_hit_codes = {
+                    str(code).strip()
+                    for pairs in result.triggers.values()
+                    for code, _ in pairs
+                    if str(code).strip()
+                }
+                lines = [
+                    f"Wyckoff Funnel (网页端) 筛选完成！",
+                    f"- L1 剥离垃圾: {len(result.layer1_symbols)} 只",
+                    f"- L2 强弱甄别: {len(result.layer2_symbols)} 只",
+                    f"- L3 板块共振: {len(result.layer3_symbols)} 只",
+                    f"- L4 命中: {len(l4_hit_codes)} 只",
+                ]
+                if result.top_sectors:
+                    lines.append("")
+                    lines.append(f"Top 行业: {', '.join(result.top_sectors)}")
+                lines.append("")
+
+                for key, label in TRIGGER_LABELS.items():
+                    pairs = sorted(result.triggers.get(key, []), key=lambda x: -x[1])
+                    if pairs:
+                        lines.append(f"**{label}**")
+                        for code, score in pairs:
+                            sec = sector_map.get(code, '')
+                            nm = name_map.get(code, '')
+                            lines.append(f"- {code} {nm} | {sec} | 评分: {score:.3f}")
+                        lines.append("")
+                content = "\n".join(lines)
+                send_feishu_notification(webhook_url, "沙里淘金筛选结果", content)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                st.toast(f"飞书推送失败: {e}", icon="⚠️")
+
     # ---- 结果展示 ----
 
     payload = st.session_state.get("funnel_payload")

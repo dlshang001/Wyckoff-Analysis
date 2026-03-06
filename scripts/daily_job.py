@@ -219,6 +219,7 @@ def main() -> int:
                     benchmark_context=benchmark_context,
                     api_key=api_key,
                     model=model,
+                    candidate_meta=symbols_info,
                     portfolio_id=portfolio_id,
                     tg_bot_token=tg_bot_token,
                     tg_chat_id=tg_chat_id,
