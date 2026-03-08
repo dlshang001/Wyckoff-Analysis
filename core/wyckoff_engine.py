@@ -100,6 +100,8 @@ class FunnelConfig:
     rps_window_slow: int = 120
     rps_fast_min: float = 75.0
     rps_slow_min: float = 70.0
+    rps_slope_window: int = 10  # 计算 RPS 斜率的窗口（交易日）
+    rps_slope_min: float = 0.5  # RPS 斜率最小值（%/day），用于判断 RPS 是否还在上升
     require_bench_latest_alignment: bool = False
     # Layer 2 潜伏通道（长强短弱）
     enable_ambush_channel: bool = True
@@ -155,12 +157,13 @@ class FunnelConfig:
     # Spring 动态振幅
     spring_tr_atr_window: int = 20           # 计算 ATR 的历史窗口
     spring_tr_atr_max_multiple: float = 4.0  # 区间最大允许振幅为 ATR_pct 的 N 倍(替代固定的30%)
+    spring_vol_expand_ratio: float = 1.3     # 收回时的成交量 / 下探时的成交量 > 此值
 
     # Layer 4 - LPS
     lps_lookback: int = 3
     lps_ma: int = 20
     lps_ma_tolerance: float = 0.02
-    lps_vol_dry_ratio: float = 0.35
+    lps_vol_dry_ratio: float = 0.5  # 改为 0.5：近期均量 / 参考均量 < 0.5（缩到 50% 以下）
     lps_vol_ref_window: int = 60
 
     # Layer 4 - Effort vs Result
@@ -179,6 +182,7 @@ class FunnelConfig:
     sos_vol_ratio: float = 2.0  # 点火当日相比近期均量的最小倍数（爆量）
     sos_vol_window: int = 20  # 计算点火爆量时的参考窗口
     sos_breakout_window: int = 20  # 要求突破或接近近 N 日的高点
+    sos_breakout_tolerance: float = 0.01  # 改为 0.01：突破容差 1%（从 2% 改为 1%）
     sos_max_bias_200: float = 40.0  # 防止在极高位将 Buying Climax 误判为 SOS
     # SOS 动态极值爆量
     sos_vol_quantile_window: int = 60        # 计算量能分位数的滚动窗口
@@ -425,12 +429,28 @@ def layer2_strength_detailed(
         rps_slow = rps_slow_map.get(sym)
         momentum_rps_ok = True
         ambush_rps_ok = True
+        
+        # 计算 RPS 斜率：判断 RPS 是否还在上升
+        rps_slope_ok = True
+        if cfg.enable_rps_filter and rps_filter_active and len(df_sorted) >= cfg.rps_slope_window:
+            close_series = pd.to_numeric(df_sorted["close"], errors="coerce")
+            rps_window = max(int(cfg.rps_slope_window), 2)
+            recent_returns = []
+            for i in range(-rps_window, 0):
+                if len(close_series) + i >= 1:
+                    ret = (float(close_series.iloc[i]) - float(close_series.iloc[i-1])) / float(close_series.iloc[i-1]) * 100.0 if float(close_series.iloc[i-1]) > 0 else 0
+                    recent_returns.append(ret)
+            if recent_returns:
+                rps_slope = (recent_returns[-1] - recent_returns[0]) / max(len(recent_returns) - 1, 1)
+                rps_slope_ok = rps_slope >= cfg.rps_slope_min
+        
         if cfg.enable_rps_filter and rps_filter_active:
             momentum_rps_ok = (
                 rps_fast is not None
                 and rps_slow is not None
                 and rps_fast >= cfg.rps_fast_min
                 and rps_slow >= cfg.rps_slow_min
+                and rps_slope_ok  # 加入 RPS 斜率判断
             )
             ambush_rps_ok = (
                 rps_fast is not None
@@ -507,7 +527,7 @@ def layer2_strength_detailed(
                 ):
                     accum_vol_ok = (recent_vol_mean / ref_vol_mean) < cfg.accum_vol_dry_ratio
 
-            # 条件 4：均线胶着——MA50 和 MA200 差距不超过阈值（尚未多头排列）
+            # 条件 4：均线即将穿越——MA50 即将穿过或刚穿过 MA200（吸筹完成信号）
             accum_ma_ok = False
             if accum_vol_ok:
                 if (
@@ -515,25 +535,28 @@ def layer2_strength_detailed(
                     and pd.notna(last_ma_long)
                     and float(last_ma_long) > 0
                 ):
-                    ma_gap = abs(float(last_ma_short) - float(last_ma_long)) / float(last_ma_long)
-                    accum_ma_ok = ma_gap <= cfg.accum_ma_gap_max
+                    # MA50 与 MA200 的差距百分比：允许在 -5% 到 +5% 之间
+                    # 即 MA50 可以在 MA200 下方 5% 以内（即将穿），或在上方 5% 以内（刚穿）
+                    ma_gap_pct = (float(last_ma_short) - float(last_ma_long)) / float(last_ma_long) * 100.0
+                    accum_ma_ok = -5.0 <= ma_gap_pct <= 5.0
 
             accum_ok = accum_low_ok and accum_range_ok and accum_vol_ok and accum_ma_ok
 
         # 地量蓄势通道（Dry Volume Channel）
-        # 低位区 + 近 N 日内出现了年内最低级别的单日成交量 → 卖压完全枯竭
+        # 低位区 + 近 N 日内出现了近 60 日最低级别的单日成交量 → 卖压完全枯竭
         dry_vol_ok = False
-        if cfg.enable_dry_vol_channel and len(df_sorted) >= cfg.dry_vol_ref_window:
+        if cfg.enable_dry_vol_channel and len(df_sorted) >= 60:
             vol = pd.to_numeric(df_sorted.get("volume"), errors="coerce")
             _c_dv = close
-            lookback_dv = max(int(cfg.dry_vol_ref_window), 2)
+            # 改用近 60 日而不是年内（cfg.dry_vol_ref_window）
+            lookback_dv = 60
             period_low_dv = float(_c_dv.tail(lookback_dv).min())
             if (
                 period_low_dv > 0
                 and float(last_close) <= period_low_dv * (1.0 + cfg.dry_vol_price_from_low_max)
             ):
-                ref_vol = vol.tail(cfg.dry_vol_ref_window)
-                if len(ref_vol.dropna()) >= 50:
+                ref_vol = vol.tail(lookback_dv)
+                if len(ref_vol.dropna()) >= 30:
                     vol_threshold = float(np.quantile(
                         ref_vol.dropna().values, cfg.dry_vol_quantile
                     ))
@@ -543,6 +566,7 @@ def layer2_strength_detailed(
 
         # 暗中护盘通道（RS Divergence Channel）
         # 大盘近期在更大窗口内创了新低，但个股同期拒绝创新低（Higher Low）
+        # 加入成交量确认：大盘创新低时成交量放大，个股拒绝创新低时成交量缩小
         rs_div_ok = False
         if (
             cfg.enable_rs_divergence_channel
@@ -577,7 +601,25 @@ def layer2_strength_detailed(
                                 stock_recent_low = float(stock_recent.min())
                                 stock_ref_low = float(stock_ref.min())
                                 if stock_recent_low >= stock_ref_low:
-                                    rs_div_ok = True
+                                    # 加入成交量确认
+                                    bench_vol = pd.to_numeric(bench_sorted.get("volume"), errors="coerce")
+                                    stock_vol = pd.to_numeric(df_sorted.get("volume"), errors="coerce")
+                                    
+                                    vol_confirm_ok = True
+                                    if not bench_vol.empty and not stock_vol.empty:
+                                        bench_recent_vol = bench_vol.tail(cfg.rs_div_bench_window).mean()
+                                        bench_ref_vol = bench_vol.tail(cfg.rs_div_bench_ref_window).iloc[:-cfg.rs_div_bench_window].mean()
+                                        stock_recent_vol = stock_vol.tail(cfg.rs_div_stock_window).mean()
+                                        stock_ref_vol = stock_vol.tail(cfg.rs_div_bench_ref_window).iloc[:-cfg.rs_div_stock_window].mean()
+                                        
+                                        if bench_ref_vol > 0 and stock_ref_vol > 0:
+                                            # 大盘创新低时成交量放大，个股拒绝创新低时成交量缩小
+                                            bench_vol_expand = bench_recent_vol > bench_ref_vol * 1.2
+                                            stock_vol_shrink = stock_recent_vol < stock_ref_vol * 0.8
+                                            vol_confirm_ok = bench_vol_expand and stock_vol_shrink
+                                    
+                                    if vol_confirm_ok:
+                                        rs_div_ok = True
 
         # 点火破局通道（SOS Bypass）
         # 如果当天爆发了放量大阳线，哪怕它此前 RPS 很低或者量能没萎缩，也直接送入 L4 让扳机去二次确认
@@ -838,6 +880,13 @@ def _detect_spring(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
     vol_avg = df_s["volume"].tail(5).iloc[:-1].mean()
     if vol_avg <= 0 or last["volume"] < vol_avg * cfg.spring_vol_ratio:
         return None
+    
+    # 加入放量确认：收回时的成交量 > 下探时的成交量
+    prev_vol = float(prev["volume"]) if pd.notna(prev["volume"]) else 0
+    last_vol = float(last["volume"]) if pd.notna(last["volume"]) else 0
+    if prev_vol > 0 and last_vol / prev_vol < cfg.spring_vol_expand_ratio:
+        return None
+    
     recovery = (last["close"] - support_level) / support_level * 100
     return float(recovery)
 
@@ -1036,8 +1085,9 @@ def _detect_sos(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
     recent_highs = high.tail(cfg.sos_breakout_window + 1).iloc[:-1]
     max_recent_high = float(recent_highs.max()) if not recent_highs.empty else float("inf")
 
-    # 接近或突破近期高点 (容差2%)
-    is_breakout = float(close_last) >= max_recent_high * 0.98
+    # 改为 1% 容差（从 2% 改为 1%）
+    breakout_tolerance = getattr(cfg, "sos_breakout_tolerance", 0.01)
+    is_breakout = float(close_last) >= max_recent_high * (1.0 - breakout_tolerance)
 
     is_ma_crossover = False
     if ma50_last is not None and pd.notna(ma50_last):
@@ -1055,9 +1105,11 @@ def layer4_triggers(
     symbols: list[str],
     df_map: dict[str, pd.DataFrame],
     cfg: FunnelConfig,
+    channel_map: dict[str, str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """
     在最终候选集上运行 Spring / LPS / EffortVsResult 检测。
+    如果 channel_map 中已经标记为"点火破局"，则跳过 SOS 检测（避免重复）。
     """
     results: dict[str, list[tuple[str, float]]] = {
         "sos": [],
@@ -1065,6 +1117,9 @@ def layer4_triggers(
         "lps": [],
         "evr": [],
     }
+    if channel_map is None:
+        channel_map = {}
+    
     for sym in symbols:
         df = df_map.get(sym)
         if df is None or df.empty:
@@ -1079,9 +1134,13 @@ def layer4_triggers(
             score = _detect_evr(df, cfg)
             if score is not None:
                 results["evr"].append((sym, score))
-        score = _detect_sos(df, cfg)
-        if score is not None:
-            results["sos"].append((sym, score))
+        
+        # 只有在 Layer 2 中没有检测到 SOS 的股票，才在 Layer 4 中检测
+        channels = channel_map.get(sym, "")
+        if "点火破局" not in channels:
+            score = _detect_sos(df, cfg)
+            if score is not None:
+                results["sos"].append((sym, score))
     return results
 
 
@@ -1461,7 +1520,7 @@ def run_funnel(
         base_symbols=l1,
         df_map=prepared_df_map,
     )
-    triggers = layer4_triggers(l3, prepared_df_map, cfg)
+    triggers = layer4_triggers(l3, prepared_df_map, cfg, channel_map=channel_map)
 
     # 新增：阶段识别和退出信号
     markup_symbols = detect_markup_stage(l3, prepared_df_map, cfg)
