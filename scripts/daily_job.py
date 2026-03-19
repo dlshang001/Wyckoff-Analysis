@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -60,6 +61,34 @@ def _log(msg: str, logs_path: str | None = None) -> None:
         os.makedirs(os.path.dirname(logs_path) or ".", exist_ok=True)
         with open(logs_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+
+class _TeeStream:
+    """将 print 输出同时写到终端和日志文件。"""
+
+    def __init__(self, console_stream, file_stream):
+        self.console_stream = console_stream
+        self.file_stream = file_stream
+
+    def write(self, data: str) -> int:
+        self.console_stream.write(data)
+        self.file_stream.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self.console_stream.flush()
+        self.file_stream.flush()
+
+
+def _run_with_stdout_tee(logs_path: str | None, fn, *args, **kwargs):
+    """运行子步骤时，将其 stdout/stderr 透传到 daily_job 日志文件。"""
+    if not logs_path:
+        return fn(*args, **kwargs)
+    os.makedirs(os.path.dirname(logs_path) or ".", exist_ok=True)
+    with open(logs_path, "a", encoding="utf-8") as log_file:
+        tee = _TeeStream(sys.stdout, log_file)
+        with redirect_stdout(tee), redirect_stderr(tee):
+            return fn(*args, **kwargs)
 
 
 def _latest_trade_date_str() -> str:
@@ -221,8 +250,13 @@ def main() -> int:
     if symbols_info:
         t0 = datetime.now(TZ)
         try:
-            step3_ok, step3_reason, step3_report_text = run_step3(
-                symbols_info, webhook, api_key, model,
+            step3_ok, step3_reason, step3_report_text = _run_with_stdout_tee(
+                logs_path,
+                run_step3,
+                symbols_info,
+                webhook,
+                api_key,
+                model,
                 benchmark_context=benchmark_context,
                 provider=provider,
                 wecom_webhook=wecom_webhook,
