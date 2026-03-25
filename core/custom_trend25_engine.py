@@ -32,7 +32,9 @@ class CustomTrend25Config:
     no_new_high_window: int = 20
     min_return_window: int = 60
     min_return_pct: float = 15.0
+    max_return_5d_window: int = 5
     max_return_5d_pct: float = 20.0
+
     no_limitup_window: int = 3
     limitup_threshold_pct: float = 9.9
 
@@ -61,19 +63,22 @@ def _to_bool(v: Any, default: bool) -> bool:
 def _parse_config(payload: dict[str, Any] | None) -> CustomTrend25Config:
     p = dict(payload or {})
     cfg = CustomTrend25Config(
-        trading_days=max(int(p.get("trading_days", 260) or 260), 120),
+        trading_days=max(int(p.get("trading_days", 260) or 260), 1),
+
         only_main_board=_to_bool(p.get("only_main_board"), True),
         exclude_chinext=_to_bool(p.get("exclude_chinext"), True),
         exclude_star=_to_bool(p.get("exclude_star"), True),
         exclude_bse=_to_bool(p.get("exclude_bse"), True),
         limit_count=max(int(p.get("limit_count", 800) or 800), 0),
         max_workers=min(max(int(p.get("max_workers", 8) or 8), 1), 24),
-        ma_short=max(int(p.get("ma_short", 10) or 10), 2),
-        ma_mid=max(int(p.get("ma_mid", 25) or 25), 3),
-        no_new_high_window=max(int(p.get("no_new_high_window", 20) or 20), 5),
-        min_return_window=max(int(p.get("min_return_window", 60) or 60), 10),
+        ma_short=max(int(p.get("ma_short", 10) or 10), 1),
+        ma_mid=max(int(p.get("ma_mid", 25) or 25), 1),
+        no_new_high_window=max(int(p.get("no_new_high_window", 20) or 20), 1),
+        min_return_window=max(int(p.get("min_return_window", 60) or 60), 1),
         min_return_pct=float(p.get("min_return_pct", 15.0) or 15.0),
+        max_return_5d_window=max(int(p.get("max_return_5d_window", 5) or 5), 1),
         max_return_5d_pct=float(p.get("max_return_5d_pct", 20.0) or 20.0),
+
         no_limitup_window=max(int(p.get("no_limitup_window", 3) or 3), 1),
         limitup_threshold_pct=float(p.get("limitup_threshold_pct", 9.9) or 9.9),
         burst_window=max(int(p.get("burst_window", 10) or 10), 2),
@@ -88,8 +93,9 @@ def _parse_config(payload: dict[str, Any] | None) -> CustomTrend25Config:
         top_n_sectors=max(int(p.get("top_n_sectors", 5) or 5), 1),
     )
     if cfg.ma_short >= cfg.ma_mid:
-        cfg.ma_short = max(2, cfg.ma_mid - 1)
+        cfg.ma_mid = cfg.ma_short + 1
     return cfg
+
 
 
 def _is_main(code: str) -> bool:
@@ -223,7 +229,14 @@ def _eval_symbol(
     name_map: dict[str, str],
     sector_map: dict[str, str],
 ) -> dict[str, Any] | None:
-    need = max(cfg.vol_avg_window + 2, cfg.ma_mid + 2, cfg.min_return_window + 2, cfg.no_new_high_window + 2)
+    need = max(
+        cfg.vol_avg_window + 2,
+        cfg.ma_mid + 2,
+        cfg.min_return_window + 2,
+        cfg.max_return_5d_window + 2,
+        cfg.no_new_high_window + 2,
+    )
+
     if df is None or df.empty or len(df) < need:
         return None
     s = df.sort_values("date").reset_index(drop=True)
@@ -243,8 +256,9 @@ def _eval_symbol(
     )
 
     ret60 = _return_pct(close, cfg.min_return_window)
-    ret5 = _return_pct(close, 5)
+    ret5 = _return_pct(close, cfg.max_return_5d_window)
     cond_ret = ret60 is not None and ret60 >= cfg.min_return_pct and ret5 is not None and ret5 < float(tuned["max_return_5d_pct"])
+
 
     no_limitup = bool(pct.tail(cfg.no_limitup_window).max() < cfg.limitup_threshold_pct)
     burst10 = bool(pct.tail(cfg.burst_window).max() >= cfg.burst_threshold_pct)
