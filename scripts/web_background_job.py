@@ -135,7 +135,33 @@ def _run_funnel_screen(request_id: str, payload: dict[str, Any]) -> dict[str, An
     }
 
 
+def _run_custom_trend25_screen(request_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from core.custom_trend25_engine import run_custom_trend25
+
+    result = run_custom_trend25(payload)
+    summary = dict(result.get("summary", {}) or {})
+    symbols_for_report = result.get("symbols_for_report", []) or []
+    return {
+        "request_id": request_id,
+        "job_kind": "custom_trend25_screen",
+        "ok": bool(result.get("ok", True)),
+        "strategy_id": str(result.get("strategy_id", "custom_trend25") or "custom_trend25"),
+        "params": result.get("params", {}) or {},
+        "tuned_params": result.get("tuned_params", {}) or {},
+        "regime_context": result.get("regime_context", {}) or {},
+        "trade_window": result.get("trade_window", {}) or {},
+        "summary": {
+            "pool_symbols": int(summary.get("pool_symbols", 0) or 0),
+            "fetched_symbols": int(summary.get("fetched_symbols", 0) or 0),
+            "selected_symbols": int(summary.get("selected_symbols", 0) or 0),
+            "top_sectors": summary.get("top_sectors", []) or [],
+        },
+        "symbols_for_report": symbols_for_report,
+    }
+
+
 def _resolve_model_credentials(payload: dict[str, Any]) -> tuple[str, str, str, str]:
+
     from integrations.llm_client import OPENAI_COMPATIBLE_BASE_URLS, SUPPORTED_PROVIDERS
 
     user_id = str(payload.get("user_id", "") or "").strip()
@@ -255,11 +281,14 @@ def main() -> int:
     try:
         if args.job_kind == "funnel_screen":
             result = _run_funnel_screen(args.request_id, payload)
+        elif args.job_kind == "custom_trend25_screen":
+            result = _run_custom_trend25_screen(args.request_id, payload)
         elif args.job_kind == "batch_ai_report":
             result = _run_batch_ai_report(args.request_id, payload)
         else:
             raise ValueError(f"不支持的 job_kind: {args.job_kind}")
         base_result.update(result)
+
     except Exception as e:
         base_result.update(
             {

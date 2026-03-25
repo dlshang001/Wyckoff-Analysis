@@ -1,0 +1,79 @@
+name: Custom Trend25 Jobs
+
+run-name: CustomTrend25 ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 前端生成的请求 ID
+        required: true
+        type: string
+      payload_json:
+        description: JSON 参数
+        required: false
+        type: string
+
+concurrency:
+  group: custom-trend25-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PYTHONUNBUFFERED: "1"
+      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TZ: Asia/Shanghai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare logs dir
+        run: mkdir -p logs
+
+      - name: Run custom trend25 job
+        env:
+          WEB_JOB_KIND: custom_trend25_screen
+          WEB_REQUEST_ID: ${{ inputs.request_id }}
+          WEB_PAYLOAD_JSON: ${{ inputs.payload_json }}
+        run: |
+          python -u scripts/web_background_job.py \
+            --job-kind "$WEB_JOB_KIND" \
+            --request-id "$WEB_REQUEST_ID" \
+            --payload-json "$WEB_PAYLOAD_JSON" \
+            --output "${{ github.workspace }}/logs/web_job_result.json" \
+            2>&1 | tee -a "${{ github.workspace }}/logs/web_job.console.log"
+
+      - name: Upload result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-job-result-${{ inputs.request_id }}
+          path: logs/web_job_result.json
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-job-logs-${{ inputs.request_id }}
+          path: logs/*
+          retention-days: 7
+          if-no-files-found: warn

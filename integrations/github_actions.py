@@ -93,10 +93,16 @@ def clear_github_actions_caches() -> None:
     load_result_json_for_run.clear()
 
 
-def trigger_web_job(job_kind: str, payload: dict[str, Any]) -> str:
+def trigger_web_job(
+    job_kind: str,
+    payload: dict[str, Any],
+    *,
+    workflow: str | None = None,
+) -> str:
     cfg = _config()
     request_id = create_request_id(job_kind)
-    url = f"{_base_api()}/actions/workflows/{cfg['workflow']}/dispatches"
+    workflow_name = str(workflow or "").strip() or cfg["workflow"]
+    url = f"{_base_api()}/actions/workflows/{workflow_name}/dispatches"
     body = {
         "ref": cfg["ref"],
         "inputs": {
@@ -105,11 +111,14 @@ def trigger_web_job(job_kind: str, payload: dict[str, Any]) -> str:
             "payload_json": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         },
     }
+    if workflow_name == "custom_trend25_jobs.yml":
+        body["inputs"].pop("job_kind", None)
     resp = requests.post(url, headers=_headers(), json=body, timeout=20)
     if resp.status_code not in {200, 201, 204}:
         raise RuntimeError(f"触发 GitHub Actions 失败: HTTP {resp.status_code} {resp.text[:300]}")
     clear_github_actions_caches()
     return request_id
+
 
 
 def _parse_run(row: dict[str, Any]) -> WorkflowRun:
@@ -126,12 +135,19 @@ def _parse_run(row: dict[str, Any]) -> WorkflowRun:
 
 
 @st.cache_data(ttl=8, show_spinner=False, max_entries=20)
-def find_run_by_request_id(request_id: str, *, per_page: int = 20) -> WorkflowRun | None:
+def find_run_by_request_id(
+    request_id: str,
+    *,
+    per_page: int = 20,
+    workflow: str | None = None,
+) -> WorkflowRun | None:
     cfg = _config()
+    workflow_name = str(workflow or "").strip() or cfg["workflow"]
     url = (
-        f"{_base_api()}/actions/workflows/{cfg['workflow']}/runs"
+        f"{_base_api()}/actions/workflows/{workflow_name}/runs"
         f"?event=workflow_dispatch&branch={cfg['ref']}&per_page={per_page}"
     )
+
     resp = requests.get(url, headers=_headers(), timeout=20)
     resp.raise_for_status()
     runs = resp.json().get("workflow_runs", []) or []
@@ -143,12 +159,18 @@ def find_run_by_request_id(request_id: str, *, per_page: int = 20) -> WorkflowRu
 
 
 @st.cache_data(ttl=10, show_spinner=False, max_entries=10)
-def list_recent_runs(*, per_page: int = 10) -> list[WorkflowRun]:
+def list_recent_runs(
+    *,
+    per_page: int = 10,
+    workflow: str | None = None,
+) -> list[WorkflowRun]:
     cfg = _config()
+    workflow_name = str(workflow or "").strip() or cfg["workflow"]
     url = (
-        f"{_base_api()}/actions/workflows/{cfg['workflow']}/runs"
+        f"{_base_api()}/actions/workflows/{workflow_name}/runs"
         f"?event=workflow_dispatch&branch={cfg['ref']}&per_page={per_page}"
     )
+
     resp = requests.get(url, headers=_headers(), timeout=20)
     resp.raise_for_status()
     rows = resp.json().get("workflow_runs", []) or []
@@ -194,8 +216,10 @@ def load_latest_result(
     *,
     requested_by_user_id: str = "",
     per_page: int = 10,
+    workflow: str | None = None,
 ) -> tuple[WorkflowRun | None, dict[str, Any] | None]:
-    for run in list_recent_runs(per_page=per_page):
+    for run in list_recent_runs(per_page=per_page, workflow=workflow):
+
         if run.status != "completed" or run.conclusion not in ("success", "failure"):
             continue
         result = load_result_json_for_run(run.run_id)

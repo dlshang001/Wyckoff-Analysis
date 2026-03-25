@@ -28,6 +28,13 @@ TRIGGER_LABELS = {
     "evr": "Effort vs Result（放量不跌）",
 }
 STATE_KEY = "funnel_background_job"
+CUSTOM_STATE_KEY = "custom_trend25_background_job"
+CUSTOM_WORKFLOW = os.getenv(
+    "GITHUB_ACTIONS_CUSTOM_TREND25_WORKFLOW_FILE",
+    "custom_trend25_jobs.yml",
+).strip() or "custom_trend25_jobs.yml"
+
+
 
 
 def _parse_symbols(text: str) -> str:
@@ -148,87 +155,236 @@ def _render_funnel_result(result: dict) -> None:
         )
 
 
-content_col = show_right_nav()
-with content_col:
-    st.title("🔬 Wyckoff Funnel")
-    st.markdown("后台版 4 层漏斗：前台只负责提交任务、看状态、读结果。")
-    st.warning(
-        "网页端不再本地执行全量漏斗。重计算已经迁到 GitHub Actions，"
-        "这样能明显降低 Streamlit 内存和超时风险。"
+def _render_custom_result(result: dict) -> None:
+    summary = result.get("summary", {}) or {}
+    symbols = result.get("symbols_for_report", []) or []
+    tuned = result.get("tuned_params", {}) or {}
+    regime = result.get("regime_context", {}) or {}
+
+    st.subheader("自定义策略结果")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("股票池", int(summary.get("pool_symbols", 0) or 0))
+    c2.metric("已拉取", int(summary.get("fetched_symbols", 0) or 0))
+    c3.metric("入选", int(summary.get("selected_symbols", 0) or 0))
+
+    top_sectors = summary.get("top_sectors", []) or []
+    if top_sectors:
+        st.info(f"行业共振 Top: {', '.join(str(x) for x in top_sectors)}")
+
+    st.caption(
+        "水温档位："
+        f"benchmark={regime.get('benchmark_regime', 'UNKNOWN')} / "
+        f"premarket={regime.get('premarket_regime', 'UNKNOWN')}"
+    )
+    st.caption(
+        "动态阈值："
+        f"成交额≥{float(tuned.get('min_avg_amount_5d_yuan', 0.0) or 0.0):,.0f}，"
+        f"量能比≥{float(tuned.get('vol_peak_ratio', 0.0) or 0.0):.2f}"
     )
 
-    with st.sidebar:
-        st.subheader("漏斗参数")
-        min_cap = st.number_input("最小市值(亿)", min_value=5.0, max_value=100.0, value=35.0, step=5.0, format="%.0f")
-        min_amt = st.number_input("近20日均成交额阈值(万)", min_value=1000.0, max_value=20000.0, value=5000.0, step=1000.0, format="%.0f")
-        ma_short = st.number_input("短期均线", min_value=10, max_value=100, value=50, step=10)
-        ma_long = st.number_input("长期均线", min_value=100, max_value=500, value=200, step=50)
-        ma_hold = st.number_input("守线均线", min_value=5, max_value=60, value=20, step=5)
-        top_n = st.number_input("Top-N 行业", min_value=1, max_value=10, value=3, step=1)
-        spring_support_w = st.number_input("Spring 支撑窗口", min_value=20, max_value=120, value=60, step=10)
-        lps_vol_dry = st.number_input("LPS 缩量比", min_value=0.1, max_value=0.8, value=0.35, step=0.05, format="%.2f")
-        evr_vol_ratio = st.number_input("EvR 量比阈值", min_value=1.0, max_value=5.0, value=2.0, step=0.5, format="%.1f")
-        trading_days = st.number_input("交易日数量", min_value=200, max_value=1200, value=500, step=50)
-        max_workers = int(st.number_input("后台并发拉取数", min_value=1, max_value=16, value=8, step=1))
-        limit_count = int(st.number_input("股票数量上限", min_value=0, max_value=5000, value=500, step=100))
-
-    st.subheader("股票池")
-    pool_mode = st.radio("来源", options=["板块", "手动输入"], horizontal=True)
-    board = "all"
-    manual_symbols = ""
-    if pool_mode == "手动输入":
-        manual_symbols = st.text_area("股票代码", placeholder="例如: 600519, 000001", height=120)
+    if symbols:
+        table = []
+        for item in symbols:
+            table.append(
+                {
+                    "代码": str(item.get("code", "")),
+                    "名称": str(item.get("name", "")),
+                    "行业": str(item.get("industry", "")),
+                    "评分": round(float(item.get("score", 0.0) or 0.0), 3),
+                    "60日涨幅%": round(float(item.get("ret_window_pct", 0.0) or 0.0), 2),
+                    "5日涨幅%": round(float(item.get("ret_5d_pct", 0.0) or 0.0), 2),
+                    "10日爆发%": round(float(item.get("burst_max_pct", 0.0) or 0.0), 2),
+                    "量峰比": round(float(item.get("vol_peak_ratio", 0.0) or 0.0), 2),
+                }
+            )
+        st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+        st.session_state["ai_find_gold_background_symbols"] = symbols
+        st.page_link("pages/AIAnalysis.py", label="前往 AI 分析页使用这批候选", icon="🤖")
     else:
-        board = st.selectbox(
-            "选择板块",
-            options=["all", "main", "chinext"],
-            format_func=lambda v: {"all": "全部主板+创业板", "main": "主板", "chinext": "创业板"}.get(v, v),
+        st.caption("无候选。")
+
+    with st.expander("后台摘要 JSON"):
+        st.json(
+            {
+                "request_id": result.get("request_id"),
+                "job_kind": result.get("job_kind"),
+                "summary": summary,
+            }
         )
 
-    run_btn = st.button("提交后台漏斗筛选", type="primary")
-    refresh_btn = st.button("刷新后台状态")
 
-    if run_btn:
-        ready, msg = background_jobs_ready_for_current_user()
-        if not ready:
-            st.error(msg)
-            st.stop()
-        payload = {
-            "pool_mode": "manual" if pool_mode == "手动输入" else "board",
-            "board": board,
-            "manual_symbols": _parse_symbols(manual_symbols),
-            "limit_count": limit_count,
-            "trading_days": int(trading_days),
-            "max_workers": int(max_workers),
-            "min_market_cap_yi": float(min_cap),
-            "min_avg_amount_wan": float(min_amt),
-            "ma_short": int(ma_short),
-            "ma_long": int(ma_long),
-            "ma_hold": int(ma_hold),
-            "top_n_sectors": int(top_n),
-            "spring_support_window": int(spring_support_w),
-            "lps_vol_dry_ratio": float(lps_vol_dry),
-            "evr_vol_ratio": float(evr_vol_ratio),
-        }
-        request_id = submit_background_job("funnel_screen", payload, state_key=STATE_KEY)
-        st.success(f"后台任务已提交：`{request_id}`")
+content_col = show_right_nav()
 
-    state = sync_background_job_state(state_key=STATE_KEY)
-    active_result = _render_job_status(state)
+with content_col:
+    st.title("🔬 Wyckoff Funnel")
+    st.markdown("后台版筛选：保留原漏斗，并行新增 custom_trend25 独立任务。")
+    st.warning(
+        "网页端不再本地执行全量筛选。重计算迁移到 GitHub Actions，"
+        "原漏斗与新策略通过独立 workflow 隔离执行。"
+    )
 
-    if refresh_btn:
-        refresh_background_job_data()
-        st.rerun()
+    tab_funnel, tab_custom = st.tabs(["原4层漏斗", "自定义并行策略"])
 
-    if not active_result:
-        latest_run, latest_result = load_latest_job_result("funnel_screen")
-        if latest_result:
-            st.divider()
-            st.caption(
-                "以下展示当前账号最近一次成功的后台漏斗结果。"
-                + (f" Run #{latest_run.run_number}" if latest_run else "")
+    with tab_funnel:
+        with st.sidebar:
+            st.subheader("漏斗参数")
+            min_cap = st.number_input("最小市值(亿)", min_value=5.0, max_value=100.0, value=35.0, step=5.0, format="%.0f")
+            min_amt = st.number_input("近20日均成交额阈值(万)", min_value=1000.0, max_value=20000.0, value=5000.0, step=1000.0, format="%.0f")
+            ma_short = st.number_input("短期均线", min_value=10, max_value=100, value=50, step=10)
+            ma_long = st.number_input("长期均线", min_value=100, max_value=500, value=200, step=50)
+            ma_hold = st.number_input("守线均线", min_value=5, max_value=60, value=20, step=5)
+            top_n = st.number_input("Top-N 行业", min_value=1, max_value=10, value=3, step=1)
+            spring_support_w = st.number_input("Spring 支撑窗口", min_value=20, max_value=120, value=60, step=10)
+            lps_vol_dry = st.number_input("LPS 缩量比", min_value=0.1, max_value=0.8, value=0.35, step=0.05, format="%.2f")
+            evr_vol_ratio = st.number_input("EvR 量比阈值", min_value=1.0, max_value=5.0, value=2.0, step=0.5, format="%.1f")
+            trading_days = st.number_input("交易日数量", min_value=200, max_value=1200, value=500, step=50)
+            max_workers = int(st.number_input("后台并发拉取数", min_value=1, max_value=16, value=8, step=1))
+            limit_count = int(st.number_input("股票数量上限", min_value=0, max_value=5000, value=500, step=100))
+
+        st.subheader("股票池")
+        pool_mode = st.radio("来源", options=["板块", "手动输入"], horizontal=True)
+        board = "all"
+        manual_symbols = ""
+        if pool_mode == "手动输入":
+            manual_symbols = st.text_area("股票代码", placeholder="例如: 600519, 000001", height=120)
+        else:
+            board = st.selectbox(
+                "选择板块",
+                options=["all", "main", "chinext"],
+                format_func=lambda v: {"all": "全部主板+创业板", "main": "主板", "chinext": "创业板"}.get(v, v),
             )
-            active_result = latest_result
 
-    if active_result:
-        _render_funnel_result(active_result)
+        run_btn = st.button("提交后台漏斗筛选", type="primary")
+        refresh_btn = st.button("刷新后台状态")
+
+        if run_btn:
+            ready, msg = background_jobs_ready_for_current_user()
+            if not ready:
+                st.error(msg)
+                st.stop()
+            payload = {
+                "pool_mode": "manual" if pool_mode == "手动输入" else "board",
+                "board": board,
+                "manual_symbols": _parse_symbols(manual_symbols),
+                "limit_count": limit_count,
+                "trading_days": int(trading_days),
+                "max_workers": int(max_workers),
+                "min_market_cap_yi": float(min_cap),
+                "min_avg_amount_wan": float(min_amt),
+                "ma_short": int(ma_short),
+                "ma_long": int(ma_long),
+                "ma_hold": int(ma_hold),
+                "top_n_sectors": int(top_n),
+                "spring_support_window": int(spring_support_w),
+                "lps_vol_dry_ratio": float(lps_vol_dry),
+                "evr_vol_ratio": float(evr_vol_ratio),
+            }
+            request_id = submit_background_job("funnel_screen", payload, state_key=STATE_KEY)
+            st.success(f"后台任务已提交：`{request_id}`")
+
+        state = sync_background_job_state(state_key=STATE_KEY)
+        active_result = _render_job_status(state)
+
+        if refresh_btn:
+            refresh_background_job_data()
+            st.rerun()
+
+        if not active_result:
+            latest_run, latest_result = load_latest_job_result("funnel_screen")
+            if latest_result:
+                st.divider()
+                st.caption(
+                    "以下展示当前账号最近一次成功的后台漏斗结果。"
+                    + (f" Run #{latest_run.run_number}" if latest_run else "")
+                )
+                active_result = latest_result
+
+        if active_result:
+            _render_funnel_result(active_result)
+
+    with tab_custom:
+        st.subheader("custom_trend25 参数")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            c_ma_short = st.number_input("短均线", min_value=3, max_value=30, value=10, step=1, key="ct_ma_short")
+            c_ma_mid = st.number_input("中均线", min_value=10, max_value=60, value=25, step=1, key="ct_ma_mid")
+            c_min_ret = st.number_input("近60日最小涨幅%", min_value=0.0, max_value=80.0, value=15.0, step=1.0, key="ct_min_ret")
+            c_max_ret5 = st.number_input("近5日最大涨幅%", min_value=1.0, max_value=40.0, value=20.0, step=1.0, key="ct_max_ret5")
+        with c2:
+            c_burst_th = st.number_input("爆发阈值%", min_value=1.0, max_value=15.0, value=6.0, step=0.5, key="ct_burst_th")
+            c_vol_ratio = st.number_input("量峰比阈值", min_value=1.0, max_value=5.0, value=1.5, step=0.1, key="ct_vol_ratio")
+            c_min_amt = st.number_input("5日均成交额下限(亿)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="ct_min_amt")
+            c_min_mv = st.number_input("流通市值下限(亿)", min_value=1.0, max_value=100.0, value=10.0, step=1.0, key="ct_min_mv")
+        with c3:
+            c_only_main = st.checkbox("仅主板", value=True, key="ct_only_main")
+            c_water = st.checkbox("启用水温自适应", value=True, key="ct_water")
+            c_sector = st.checkbox("启用行业共振", value=True, key="ct_sector")
+            c_topn = st.number_input("行业TopN", min_value=1, max_value=10, value=5, step=1, key="ct_topn")
+            c_trading_days = st.number_input("交易日窗口", min_value=120, max_value=600, value=260, step=10, key="ct_days")
+            c_limit = st.number_input("股票池上限", min_value=100, max_value=5000, value=800, step=100, key="ct_limit")
+
+        c_run = st.button("提交 custom_trend25 后台筛选", type="primary")
+        c_refresh = st.button("刷新 custom_trend25 状态")
+
+        if c_run:
+            ready, msg = background_jobs_ready_for_current_user()
+            if not ready:
+                st.error(msg)
+                st.stop()
+            payload = {
+                "trading_days": int(c_trading_days),
+                "only_main_board": bool(c_only_main),
+                "exclude_chinext": True,
+                "exclude_star": True,
+                "exclude_bse": True,
+                "limit_count": int(c_limit),
+                "max_workers": 8,
+                "ma_short": int(c_ma_short),
+                "ma_mid": int(c_ma_mid),
+                "min_return_window": 60,
+                "min_return_pct": float(c_min_ret),
+                "max_return_5d_pct": float(c_max_ret5),
+                "no_limitup_window": 3,
+                "limitup_threshold_pct": 9.9,
+                "burst_window": 10,
+                "burst_threshold_pct": float(c_burst_th),
+                "vol_peak_window": 10,
+                "vol_avg_window": 60,
+                "vol_peak_ratio": float(c_vol_ratio),
+                "min_avg_amount_5d_yuan": float(c_min_amt) * 1e8,
+                "min_market_cap_yi": float(c_min_mv),
+                "enable_water_adapt": bool(c_water),
+                "enable_sector_resonance": bool(c_sector),
+                "top_n_sectors": int(c_topn),
+            }
+            request_id = submit_background_job(
+                "custom_trend25_screen",
+                payload,
+                state_key=CUSTOM_STATE_KEY,
+                workflow=CUSTOM_WORKFLOW,
+            )
+            st.success(f"custom_trend25 任务已提交：`{request_id}`")
+
+        c_state = sync_background_job_state(state_key=CUSTOM_STATE_KEY)
+        c_result = _render_job_status(c_state)
+
+        if c_refresh:
+            refresh_background_job_data()
+            st.rerun()
+
+        if not c_result:
+            c_latest_run, c_latest_result = load_latest_job_result(
+                "custom_trend25_screen",
+                workflow=CUSTOM_WORKFLOW,
+            )
+            if c_latest_result:
+                st.divider()
+                st.caption(
+                    "以下展示当前账号最近一次成功的 custom_trend25 结果。"
+                    + (f" Run #{c_latest_run.run_number}" if c_latest_run else "")
+                )
+                c_result = c_latest_result
+
+        if c_result:
+            _render_custom_result(c_result)
+
