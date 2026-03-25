@@ -22,15 +22,25 @@ def current_user_id() -> str:
     return ""
 
 
+def current_user_email() -> str:
+    user = st.session_state.get("user") or {}
+    if isinstance(user, dict):
+        return str(user.get("email", "") or "").strip().lower()
+    return ""
+
+
 def background_jobs_ready_for_current_user() -> tuple[bool, str]:
+
     ready, msg = github_actions_ready()
     if not ready:
         return (False, msg)
     user_id = current_user_id()
+    user_email = current_user_email()
     if not user_id:
         return (False, "当前未登录")
-    if not background_jobs_allowed_for_user(user_id):
+    if not background_jobs_allowed_for_user(user_id, user_email=user_email):
         return (False, "当前账号未被授权触发后台任务")
+
     return (True, "")
 
 

@@ -45,7 +45,9 @@ def _config() -> dict[str, str]:
         "ref": _secrets_get("GITHUB_ACTIONS_REF", DEFAULT_REF),
         "workflow": _secrets_get("GITHUB_ACTIONS_WORKFLOW_FILE", DEFAULT_WORKFLOW_FILE),
         "allow_user_ids": _secrets_get("GITHUB_ACTIONS_ALLOWED_USER_IDS"),
+        "allow_users": _secrets_get("GITHUB_ACTIONS_ALLOWED_USERS"),
     }
+
 
 
 def github_actions_ready() -> tuple[bool, str]:
@@ -55,15 +57,18 @@ def github_actions_ready() -> tuple[bool, str]:
     return (True, "")
 
 
-def background_jobs_allowed_for_user(user_id: str) -> bool:
+def background_jobs_allowed_for_user(user_id: str, *, user_email: str = "") -> bool:
     cfg = _config()
-    allow_raw = str(cfg.get("allow_user_ids", "") or "").strip()
+    allow_raw = str(cfg.get("allow_users", "") or "").strip() or str(cfg.get("allow_user_ids", "") or "").strip()
     if not allow_raw:
         return True
     allow_set = {
-        x.strip() for x in allow_raw.replace(";", ",").split(",") if x.strip()
+        x.strip().lower() for x in allow_raw.replace(";", ",").split(",") if x.strip()
     }
-    return str(user_id or "").strip() in allow_set
+    user_id_s = str(user_id or "").strip().lower()
+    user_email_s = str(user_email or "").strip().lower()
+    return bool((user_id_s and user_id_s in allow_set) or (user_email_s and user_email_s in allow_set))
+
 
 
 def _headers() -> dict[str, str]:
