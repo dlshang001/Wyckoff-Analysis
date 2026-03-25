@@ -161,7 +161,8 @@ def _render_custom_result(result: dict) -> None:
     tuned = result.get("tuned_params", {}) or {}
     regime = result.get("regime_context", {}) or {}
 
-    st.subheader("自定义策略结果")
+    st.subheader("中期趋势策略结果")
+
     c1, c2, c3 = st.columns(3)
     c1.metric("股票池", int(summary.get("pool_symbols", 0) or 0))
     c2.metric("已拉取", int(summary.get("fetched_symbols", 0) or 0))
@@ -217,29 +218,35 @@ content_col = show_right_nav()
 
 with content_col:
     st.title("🔬 Wyckoff Funnel")
-    st.markdown("后台版筛选：保留原漏斗，并行新增 custom_trend25 独立任务。")
+    st.markdown("后台版筛选：保留原漏斗，并行新增中期趋势策略独立任务。")
+
     st.warning(
         "网页端不再本地执行全量筛选。重计算迁移到 GitHub Actions，"
         "原漏斗与新策略通过独立 workflow 隔离执行。"
     )
 
-    tab_funnel, tab_custom = st.tabs(["原4层漏斗", "自定义并行策略"])
+    tab_funnel, tab_custom = st.tabs(["4层漏斗", "中期趋势策略"])
+
 
     with tab_funnel:
-        with st.sidebar:
-            st.subheader("漏斗参数")
+        st.subheader("漏斗参数")
+        f1, f2, f3 = st.columns(3)
+        with f1:
             min_cap = st.number_input("最小市值(亿)", min_value=5.0, max_value=100.0, value=35.0, step=5.0, format="%.0f")
-            min_amt = st.number_input("近20日均成交额阈值(万)", min_value=1000.0, max_value=20000.0, value=5000.0, step=1000.0, format="%.0f")
-            ma_short = st.number_input("短期均线", min_value=10, max_value=100, value=50, step=10)
-            ma_long = st.number_input("长期均线", min_value=100, max_value=500, value=200, step=50)
-            ma_hold = st.number_input("守线均线", min_value=5, max_value=60, value=20, step=5)
-            top_n = st.number_input("Top-N 行业", min_value=1, max_value=10, value=3, step=1)
-            spring_support_w = st.number_input("Spring 支撑窗口", min_value=20, max_value=120, value=60, step=10)
+            ma_short = st.number_input("短期均线", min_value=1, max_value=100, value=50, step=1)
+            ma_hold = st.number_input("守线均线", min_value=1, max_value=60, value=20, step=1)
             lps_vol_dry = st.number_input("LPS 缩量比", min_value=0.1, max_value=0.8, value=0.35, step=0.05, format="%.2f")
+        with f2:
+            min_amt = st.number_input("近20日均成交额阈值(万)", min_value=1000.0, max_value=20000.0, value=5000.0, step=1000.0, format="%.0f")
+            ma_long = st.number_input("长期均线", min_value=1, max_value=500, value=200, step=1)
+            top_n = st.number_input("Top-N 行业", min_value=1, max_value=10, value=3, step=1)
             evr_vol_ratio = st.number_input("EvR 量比阈值", min_value=1.0, max_value=5.0, value=2.0, step=0.5, format="%.1f")
-            trading_days = st.number_input("交易日数量", min_value=200, max_value=1200, value=500, step=50)
+        with f3:
+            spring_support_w = st.number_input("Spring 支撑窗口", min_value=1, max_value=120, value=60, step=1)
+            trading_days = st.number_input("交易日数量", min_value=1, max_value=1200, value=500, step=1)
             max_workers = int(st.number_input("后台并发拉取数", min_value=1, max_value=16, value=8, step=1))
             limit_count = int(st.number_input("股票数量上限", min_value=0, max_value=5000, value=500, step=100))
+
 
         st.subheader("股票池")
         pool_mode = st.radio("来源", options=["板块", "手动输入"], horizontal=True)
@@ -267,18 +274,19 @@ with content_col:
                 "board": board,
                 "manual_symbols": _parse_symbols(manual_symbols),
                 "limit_count": limit_count,
-                "trading_days": int(trading_days),
+                "trading_days": max(1, int(trading_days)),
                 "max_workers": int(max_workers),
                 "min_market_cap_yi": float(min_cap),
                 "min_avg_amount_wan": float(min_amt),
-                "ma_short": int(ma_short),
-                "ma_long": int(ma_long),
-                "ma_hold": int(ma_hold),
+                "ma_short": max(1, int(ma_short)),
+                "ma_long": max(1, int(ma_long)),
+                "ma_hold": max(1, int(ma_hold)),
                 "top_n_sectors": int(top_n),
-                "spring_support_window": int(spring_support_w),
+                "spring_support_window": max(1, int(spring_support_w)),
                 "lps_vol_dry_ratio": float(lps_vol_dry),
                 "evr_vol_ratio": float(evr_vol_ratio),
             }
+
             request_id = submit_background_job("funnel_screen", payload, state_key=STATE_KEY)
             st.success(f"后台任务已提交：`{request_id}`")
 
@@ -303,11 +311,13 @@ with content_col:
             _render_funnel_result(active_result)
 
     with tab_custom:
-        st.subheader("custom_trend25 参数")
+        st.subheader("中期趋势策略参数")
+
         c1, c2, c3 = st.columns(3)
         with c1:
-            c_ma_short = st.number_input("短均线", min_value=3, max_value=30, value=10, step=1, key="ct_ma_short")
-            c_ma_mid = st.number_input("中均线", min_value=10, max_value=60, value=25, step=1, key="ct_ma_mid")
+            c_ma_short = st.number_input("短均线", min_value=1, max_value=30, value=10, step=1, key="ct_ma_short")
+            c_ma_mid = st.number_input("中均线", min_value=1, max_value=60, value=25, step=1, key="ct_ma_mid")
+
             c_min_ret = st.number_input("近60日最小涨幅%", min_value=0.0, max_value=80.0, value=15.0, step=1.0, key="ct_min_ret")
             c_max_ret5 = st.number_input("近5日最大涨幅%", min_value=1.0, max_value=40.0, value=20.0, step=1.0, key="ct_max_ret5")
         with c2:
@@ -320,11 +330,13 @@ with content_col:
             c_water = st.checkbox("启用水温自适应", value=True, key="ct_water")
             c_sector = st.checkbox("启用行业共振", value=True, key="ct_sector")
             c_topn = st.number_input("行业TopN", min_value=1, max_value=10, value=5, step=1, key="ct_topn")
-            c_trading_days = st.number_input("交易日窗口", min_value=120, max_value=600, value=260, step=10, key="ct_days")
+            c_trading_days = st.number_input("交易日窗口", min_value=1, max_value=600, value=260, step=1, key="ct_days")
+
             c_limit = st.number_input("股票池上限", min_value=100, max_value=5000, value=800, step=100, key="ct_limit")
 
-        c_run = st.button("提交 custom_trend25 后台筛选", type="primary")
-        c_refresh = st.button("刷新 custom_trend25 状态")
+        c_run = st.button("提交中期趋势策略后台筛选", type="primary")
+        c_refresh = st.button("刷新中期趋势策略状态")
+
 
         if c_run:
             ready, msg = background_jobs_ready_for_current_user()
@@ -332,15 +344,16 @@ with content_col:
                 st.error(msg)
                 st.stop()
             payload = {
-                "trading_days": int(c_trading_days),
+                "trading_days": max(1, int(c_trading_days)),
                 "only_main_board": bool(c_only_main),
                 "exclude_chinext": True,
                 "exclude_star": True,
                 "exclude_bse": True,
                 "limit_count": int(c_limit),
                 "max_workers": 8,
-                "ma_short": int(c_ma_short),
-                "ma_mid": int(c_ma_mid),
+                "ma_short": max(1, int(c_ma_short)),
+                "ma_mid": max(1, int(c_ma_mid)),
+
                 "min_return_window": 60,
                 "min_return_pct": float(c_min_ret),
                 "max_return_5d_pct": float(c_max_ret5),
@@ -363,7 +376,8 @@ with content_col:
                 state_key=CUSTOM_STATE_KEY,
                 workflow=CUSTOM_WORKFLOW,
             )
-            st.success(f"custom_trend25 任务已提交：`{request_id}`")
+            st.success(f"中期趋势策略任务已提交：`{request_id}`")
+
 
         c_state = sync_background_job_state(state_key=CUSTOM_STATE_KEY)
         c_result = _render_job_status(c_state)
@@ -380,9 +394,10 @@ with content_col:
             if c_latest_result:
                 st.divider()
                 st.caption(
-                    "以下展示当前账号最近一次成功的 custom_trend25 结果。"
+                    "以下展示当前账号最近一次成功的中期趋势策略结果。"
                     + (f" Run #{c_latest_run.run_number}" if c_latest_run else "")
                 )
+
                 c_result = c_latest_result
 
         if c_result:
