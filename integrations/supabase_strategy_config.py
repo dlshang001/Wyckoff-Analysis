@@ -5,29 +5,56 @@ import os
 from datetime import datetime
 from typing import Any
 
+import streamlit as st
 from supabase import Client, create_client
 
 from core.constants import TABLE_STRATEGY_CONFIGS
 from core.custom_trend25_engine import CustomTrend25Config
 
 
-def _get_supabase_admin_client() -> Client:
+def _get_supabase_base_client() -> Client:
     url = (os.getenv("SUPABASE_URL") or "").strip()
-    key = (
-        (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-        or (os.getenv("SUPABASE_KEY") or "").strip()
-    )
+    key = (os.getenv("SUPABASE_KEY") or "").strip()
     if not url or not key:
-        raise ValueError("SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY 未配置")
+        try:
+            url = st.secrets["SUPABASE_URL"]
+            key = st.secrets["SUPABASE_KEY"]
+        except (FileNotFoundError, KeyError):
+            pass
+    if not url or not key:
+        raise ValueError("SUPABASE_URL/SUPABASE_KEY 未配置")
     return create_client(url, key)
+
+
+def _apply_user_session(supabase: Client) -> None:
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if access_token and refresh_token:
+        try:
+            supabase.auth.set_session(access_token, refresh_token)
+        except Exception:
+            pass
+    if access_token:
+        supabase.postgrest.auth(access_token)
+
+
+def get_supabase_client() -> Client:
+    if "supabase_client_base" not in st.session_state:
+        st.session_state.supabase_client_base = _get_supabase_base_client()
+    supabase = st.session_state.supabase_client_base
+    _apply_user_session(supabase)
+    return supabase
 
 
 def is_supabase_configured() -> bool:
     url = (os.getenv("SUPABASE_URL") or "").strip()
-    key = (
-        (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-        or (os.getenv("SUPABASE_KEY") or "").strip()
-    )
+    key = (os.getenv("SUPABASE_KEY") or "").strip()
+    if not url or not key:
+        try:
+            url = st.secrets["SUPABASE_URL"]
+            key = st.secrets["SUPABASE_KEY"]
+        except (FileNotFoundError, KeyError):
+            pass
     return bool(url and key)
 
 
@@ -37,7 +64,7 @@ def load_strategy_config(user_id: str, strategy_id: str = "custom_trend25") -> d
     if not user_id or not is_supabase_configured():
         return None
     try:
-        client = _get_supabase_admin_client()
+        client = get_supabase_client()
         resp = (
             client.table(TABLE_STRATEGY_CONFIGS)
             .select("*")
@@ -63,7 +90,7 @@ def save_strategy_config(user_id: str, strategy_id: str, config: dict[str, Any])
     if not user_id or not strategy_id or not is_supabase_configured():
         return False
     try:
-        client = _get_supabase_admin_client()
+        client = get_supabase_client()
         payload = {
             "user_id": user_id,
             "strategy_id": strategy_id,
