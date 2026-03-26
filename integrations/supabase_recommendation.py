@@ -207,12 +207,13 @@ def upsert_recommendations(recommend_date: int, symbols_info: list[dict[str, Any
                 ).execute()
             except Exception as e:
                 msg = str(e).lower()
-                if "is_ai_recommended" in msg or "funnel_score" in msg:
+                optional_cols = ("is_ai_recommended", "funnel_score", "recommend_count")
+                if any(col in msg for col in optional_cols):
                     fallback_payload: list[dict[str, Any]] = []
                     for row in payload:
                         r = dict(row)
-                        r.pop("is_ai_recommended", None)
-                        r.pop("funnel_score", None)
+                        for col in optional_cols:
+                            r.pop(col, None)
                         fallback_payload.append(r)
                     client.table(TABLE_RECOMMENDATION_TRACKING).upsert(
                         fallback_payload, on_conflict="code,recommend_date"

@@ -256,7 +256,7 @@ def main() -> int:
     # 阶段 2：批量研报（可降级：失败不影响 Funnel 成功）
     step3_ok = True
     step3_err = None
-    step3_operation_codes: list[str] = []
+    step3_springboard_codes: list[str] = []
     if symbols_info:
         t0 = datetime.now(TZ)
         try:
@@ -284,13 +284,13 @@ def main() -> int:
                 if isinstance(item, dict)
             ]
             try:
-                step3_operation_codes = extract_operation_pool_codes(
+                step3_springboard_codes = extract_operation_pool_codes(
                     report=step3_report_text,
                     allowed_codes=allowed_codes,
                 )
             except Exception as e:
-                step3_operation_codes = []
-                _log(f"阶段 2 批量研报: 可操作池解析失败，已降级为空。err={e}", logs_path)
+                step3_springboard_codes = []
+                _log(f"阶段 2 批量研报: 起跳板解析失败，已降级为空。err={e}", logs_path)
         elapsed3 = (datetime.now(TZ) - t0).total_seconds()
         summary.append({
             "step": "批量研报",
@@ -300,20 +300,20 @@ def main() -> int:
             "output": f"{len(symbols_info)} symbols",
         })
         _log(f"阶段 2 批量研报: ok={step3_ok}, elapsed={elapsed3:.1f}s, err={step3_err}", logs_path)
-        preview_codes = ", ".join(step3_operation_codes[:8]) if step3_operation_codes else "无"
+        preview_codes = ", ".join(step3_springboard_codes[:8]) if step3_springboard_codes else "无"
         _log(
-            f"阶段 2 批量研报: 可操作池代码={len(step3_operation_codes)} ({preview_codes})",
+            f"阶段 2 批量研报: 起跳板代码={len(step3_springboard_codes)} ({preview_codes})",
             logs_path,
         )
         if recommend_trade_date_int is not None:
             try:
                 ai_mark_ok = mark_ai_recommendations(
                     recommend_date=recommend_trade_date_int,
-                    ai_codes=step3_operation_codes,
+                    ai_codes=step3_springboard_codes,
                 )
                 _log(
                     "推荐记录AI标记: "
-                    f"ok={ai_mark_ok}, date={recommend_trade_date_int}, ai_count={len(step3_operation_codes)}",
+                    f"ok={ai_mark_ok}, date={recommend_trade_date_int}, ai_count={len(step3_springboard_codes)}",
                     logs_path,
                 )
             except Exception as e:
@@ -364,8 +364,8 @@ def main() -> int:
             user_id = str(step4_target.get("user_id", "") or "").strip()
             portfolio_id = str(step4_target.get("portfolio_id", "") or "").strip()
             step4_candidate_meta: list[dict] = []
-            if step3_operation_codes:
-                allowed_set = set(step3_operation_codes)
+            if step3_springboard_codes:
+                allowed_set = set(step3_springboard_codes)
                 for item in symbols_info:
                     if not isinstance(item, dict):
                         continue
@@ -373,7 +373,7 @@ def main() -> int:
                     if code in allowed_set:
                         step4_candidate_meta.append(item)
             _log(
-                f"阶段 3 私人再平衡: 候选收口为 Step3 可操作池 {len(step4_candidate_meta)} 只",
+                f"阶段 3 私人再平衡: 候选收口为 Step3 起跳板 {len(step4_candidate_meta)} 只",
                 logs_path,
             )
             step4_ok = True
