@@ -80,10 +80,30 @@ def _render_job_status(state: dict | None) -> dict | None:
 
 
 def _render_funnel_result(result: dict) -> None:
+    from datetime import date
+    from utils.notify import send_all_webhooks
+
     summary = result.get("summary", {}) or {}
     metrics = result.get("metrics", {}) or {}
     trigger_groups = result.get("trigger_groups", {}) or {}
     symbols_for_report = result.get("symbols_for_report", []) or []
+    request_id = str(result.get("request_id", "") or "").strip()
+
+    notified_key = f"funnel_notified_{request_id}"
+    if not st.session_state.get(notified_key):
+        feishu = str(st.session_state.get("feishu_webhook") or "").strip()
+        wecom = str(st.session_state.get("wecom_webhook") or "").strip()
+        dingtalk = str(st.session_state.get("dingtalk_webhook") or "").strip()
+        if feishu or wecom or dingtalk:
+            content_preview = str(result.get("content_preview", "") or "")
+            if content_preview:
+                notify_title = f"🔬 Wyckoff Funnel {date.today().strftime('%Y-%m-%d')}"
+                try:
+                    send_all_webhooks(feishu, wecom, dingtalk, notify_title, content_preview)
+                    st.toast("✅ 筛选结果已推送至配置的通知渠道", icon="🔔")
+                except Exception as e:
+                    st.warning(f"通知推送失败: {e}")
+            st.session_state[notified_key] = True
 
     st.subheader("漏斗结果")
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -156,10 +176,55 @@ def _render_funnel_result(result: dict) -> None:
 
 
 def _render_custom_result(result: dict) -> None:
+    from datetime import date
+    from utils.notify import send_all_webhooks
+
     summary = result.get("summary", {}) or {}
     symbols = result.get("symbols_for_report", []) or []
     tuned = result.get("tuned_params", {}) or {}
     regime = result.get("regime_context", {}) or {}
+    request_id = str(result.get("request_id", "") or "").strip()
+
+    notified_key = f"custom_trend25_notified_{request_id}"
+    if not st.session_state.get(notified_key):
+        feishu = str(st.session_state.get("feishu_webhook") or "").strip()
+        wecom = str(st.session_state.get("wecom_webhook") or "").strip()
+        dingtalk = str(st.session_state.get("dingtalk_webhook") or "").strip()
+        if feishu or wecom or dingtalk:
+            lines = [
+                "## 中期趋势策略结果",
+                f"- **股票池**: {int(summary.get('pool_symbols', 0) or 0)} 只",
+                f"- **已拉取**: {int(summary.get('fetched_symbols', 0) or 0)} 只",
+                f"- **入选**: {int(summary.get('selected_symbols', 0) or 0)} 只",
+                f"- **Top 行业**: {', '.join(str(x) for x in (summary.get('top_sectors', []) or [])) or '无'}",
+                "",
+                "## 水温与阈值",
+                f"- **水温档位**: benchmark={regime.get('benchmark_regime', 'UNKNOWN')} / premarket={regime.get('premarket_regime', 'UNKNOWN')}",
+                f"- **动态阈值**: 成交额≥{float(tuned.get('min_avg_amount_5d_yuan', 0.0) or 0.0):,.0f}，量能比≥{float(tuned.get('vol_peak_ratio', 0.0) or 0.0):.2f}",
+                "",
+                "## 入选股票",
+            ]
+            if symbols:
+                for item in symbols[:20]:
+                    code = str(item.get("code", ""))
+                    name = str(item.get("name", code))
+                    industry = str(item.get("industry", ""))
+                    score = float(item.get("score", 0.0) or 0.0)
+                    ret60 = float(item.get("ret_window_pct", 0.0) or 0.0)
+                    ret5 = float(item.get("ret_5d_pct", 0.0) or 0.0)
+                    lines.append(f"- {code} {name} | {industry} | score={score:.2f} | 60日={ret60:+.1f}% | 5日={ret5:+.1f}%")
+                if len(symbols) > 20:
+                    lines.append(f"- ... 共 {len(symbols)} 只")
+            else:
+                lines.append("- 无候选")
+            content = "\n".join(lines)
+            notify_title = f"📈 中期趋势策略 {date.today().strftime('%Y-%m-%d')}"
+            try:
+                send_all_webhooks(feishu, wecom, dingtalk, notify_title, content)
+                st.toast("✅ 筛选结果已推送至配置的通知渠道", icon="🔔")
+            except Exception as e:
+                st.warning(f"通知推送失败: {e}")
+            st.session_state[notified_key] = True
 
     st.subheader("中期趋势策略结果")
 
