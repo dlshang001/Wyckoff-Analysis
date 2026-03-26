@@ -898,11 +898,9 @@ def layer3_sector_resonance(
         keep_sectors_sorted[:top_n] if top_n > 0 else keep_sectors_sorted
     )
 
-    # 威科夫重个股量价、轻板块，但需要板块强度护航。
-    # 重新开启 L3 拦截（丢掉没有板块效应的个股）
-    keep_set = set(keep_sectors_sorted)
-    filtered = [sym for sym in symbols if sector_map.get(sym, "") in keep_set]
-    return filtered, top_sectors
+    # L3 仅提供行业共振标签与 Top 行业，不在此层做个股硬剔除。
+    # 真正的优先级收口交给后续打分与配额逻辑统一处理。
+    return list(symbols), top_sectors
 
 
 

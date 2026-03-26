@@ -134,6 +134,7 @@ FUNNEL_AI_SELECTION_MODE = (
     os.getenv("FUNNEL_AI_SELECTION_MODE", "legacy_full_hits").strip().lower()
 )
 FUNNEL_CARD_STYLE = os.getenv("FUNNEL_CARD_STYLE", "legacy_compact").strip().lower()
+FUNNEL_EVR_POLICY = os.getenv("FUNNEL_EVR_POLICY", "all_regimes").strip().lower()
 
 
 def _parse_int_env(name: str, default: int) -> int:
@@ -647,9 +648,20 @@ def _analyze_benchmark_and_tune_cfg(
                 f"rebound_ok(main_today={main_today_pct}, small_today={small_today_pct})",
             ]
 
-    # EVR 按市场水温自动开关（不受环境变量覆盖）。
-    # 冷市场（RISK_OFF/CRASH）开启 EVR 防派发；其余关闭以减少踏空。
-    cfg.enable_evr_trigger = regime in {"RISK_OFF", "CRASH"}
+    # EVR 开关策略：
+    # - all_regimes(默认): 各市场水温都开启，保持信号连续性
+    # - cold_only: 仅在 RISK_OFF/CRASH 开启
+    # - respect_cfg: 使用 FunnelConfig 当前值
+    # - off: 全关闭
+    evr_policy = FUNNEL_EVR_POLICY
+    if evr_policy in {"cold_only", "risk_off", "risk_off_crash"}:
+        cfg.enable_evr_trigger = regime in {"RISK_OFF", "CRASH"}
+    elif evr_policy in {"off", "disabled", "disable", "0", "false", "no"}:
+        cfg.enable_evr_trigger = False
+    elif evr_policy in {"respect_cfg", "cfg", "config"}:
+        cfg.enable_evr_trigger = bool(cfg.enable_evr_trigger)
+    else:
+        cfg.enable_evr_trigger = True
 
     # 动态调参：风险越冷，过滤越严
     if regime == "CRASH":
