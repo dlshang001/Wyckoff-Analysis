@@ -1,0 +1,109 @@
+name: Custom Trend25 Daily
+
+on:
+  schedule:
+    - cron: '30 10 * * 0-4'
+  workflow_dispatch:
+
+concurrency:
+  group: daily-job-trend25-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+      WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+      DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+      DEFAULT_LLM_PROVIDER: ${{ secrets.DEFAULT_LLM_PROVIDER }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+      ZHIPU_MODEL: ${{ secrets.ZHIPU_MODEL }}
+      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      QWEN_MODEL: ${{ secrets.QWEN_MODEL }}
+      TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+      MY_PORTFOLIO_STATE: ${{ secrets.MY_PORTFOLIO_STATE }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+      STEP4_BUY_HARD_STOP_ENABLED: "1"
+      STEP4_BUY_HARD_STOP_PCT: "9.0"
+      STEP4_BUY_STOP_MODE: "floor"
+      STEP4_PROBE_BUDGET_LIMIT: "0.10"
+      STEP4_ATTACK_BUDGET_LIMIT: "0.20"
+      TZ: Asia/Shanghai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare logs dir
+        run: mkdir -p logs
+
+      - name: Run daily job (Trend25)
+        run: |
+          python -u scripts/daily_job_trend25.py --logs ${{ github.workspace }}/logs/daily_job_trend25.log \
+            2>&1 | tee -a ${{ github.workspace }}/logs/daily_job_trend25.console.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-job-trend25-logs-${{ github.run_number }}
+          path: logs/*.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW: ${{ github.workflow }}
+          REF: ${{ github.ref_name }}
+        run: |
+          python -c "
+          import os, urllib.request, json
+          url = os.environ.get('FEISHU_WEBHOOK_URL', '')
+          if not url:
+            print('FEISHU_WEBHOOK_URL 未配置，跳过失败通知')
+            exit(0)
+          content = '**Run**: ' + os.environ.get('RUN_URL', '') + '\n**Workflow**: ' + os.environ.get('WORKFLOW', '') + '\n**Branch**: ' + os.environ.get('REF', '')
+          payload = {
+            'msg_type': 'interactive',
+            'card': {
+              'header': {'title': {'tag': 'plain_text', 'content': '❌ 中期趋势策略定时任务失败'}},
+              'elements': [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': content}}]
+            }
+          }
+          req = urllib_request.Request(url, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
+          try:
+            urllib.request.urlopen(req, timeout=10)
+          except Exception as e:
+            print(f'飞书通知发送失败: {e}')
+          "
