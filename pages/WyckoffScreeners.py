@@ -80,7 +80,7 @@ def _render_job_status(state: dict | None) -> dict | None:
     return result if isinstance(result, dict) else None
 
 
-def _render_funnel_result(result: dict) -> None:
+def _render_funnel_result(result: dict, is_newly_completed: bool = False) -> None:
     from datetime import date
     from utils.notify import send_all_webhooks
 
@@ -91,7 +91,7 @@ def _render_funnel_result(result: dict) -> None:
     request_id = str(result.get("request_id", "") or "").strip()
 
     notified_key = f"funnel_notified_{request_id}"
-    if not st.session_state.get(notified_key):
+    if is_newly_completed and not st.session_state.get(notified_key):
         feishu = str(st.session_state.get("feishu_webhook") or "").strip()
         wecom = str(st.session_state.get("wecom_webhook") or "").strip()
         dingtalk = str(st.session_state.get("dingtalk_webhook") or "").strip()
@@ -176,7 +176,7 @@ def _render_funnel_result(result: dict) -> None:
         )
 
 
-def _render_custom_result(result: dict) -> None:
+def _render_custom_result(result: dict, is_newly_completed: bool = False) -> None:
     from datetime import date
     from utils.notify import send_all_webhooks
 
@@ -187,7 +187,7 @@ def _render_custom_result(result: dict) -> None:
     request_id = str(result.get("request_id", "") or "").strip()
 
     notified_key = f"custom_trend25_notified_{request_id}"
-    if not st.session_state.get(notified_key):
+    if is_newly_completed and not st.session_state.get(notified_key):
         feishu = str(st.session_state.get("feishu_webhook") or "").strip()
         wecom = str(st.session_state.get("wecom_webhook") or "").strip()
         dingtalk = str(st.session_state.get("dingtalk_webhook") or "").strip()
@@ -364,6 +364,7 @@ with content_col:
             refresh_background_job_data()
             st.rerun()
 
+        is_newly_completed = False
         if not active_result:
             latest_run, latest_result = load_latest_job_result("funnel_screen")
             if latest_result:
@@ -373,9 +374,11 @@ with content_col:
                     + (f" Run #{latest_run.run_number}" if latest_run else "")
                 )
                 active_result = latest_result
+        else:
+            is_newly_completed = True
 
         if active_result:
-            _render_funnel_result(active_result)
+            _render_funnel_result(active_result, is_newly_completed=is_newly_completed)
 
     with tab_custom:
         user = st.session_state.get("user") or {}
@@ -530,6 +533,7 @@ with content_col:
             refresh_background_job_data()
             st.rerun()
 
+        c_is_newly_completed = False
         if not c_result:
             c_latest_run, c_latest_result = load_latest_job_result(
                 "custom_trend25_screen",
@@ -542,8 +546,10 @@ with content_col:
                     + (f" Run #{c_latest_run.run_number}" if c_latest_run else "")
                 )
                 c_result = c_latest_result
+        else:
+            c_is_newly_completed = True
 
         if c_result:
-            _render_custom_result(c_result)
+            _render_custom_result(c_result, is_newly_completed=c_is_newly_completed)
 
 

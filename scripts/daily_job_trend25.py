@@ -221,6 +221,7 @@ def main() -> int:
         run as run_step3,
     )
     from scripts.step4_rebalancer import run as run_step4
+    from integrations.supabase_client import load_user_trend25_config
 
     summary: list[dict] = []
     has_blocking_failure = False
@@ -231,11 +232,15 @@ def main() -> int:
 
     _log("开始中期趋势策略定时任务", logs_path)
 
+    target_user_id = os.getenv("SUPABASE_USER_ID", "").strip()
+    trend25_config = load_user_trend25_config(target_user_id)
+    _log(f"加载用户策略配置: user_id={target_user_id}, limit_count={trend25_config.get('limit_count')}, ma_short={trend25_config.get('ma_short')}, ma_mid={trend25_config.get('ma_mid')}", logs_path)
+
     t0 = datetime.now(TZ)
     step1_ok = False
     step1_err = None
     try:
-        result = run_custom_trend25(payload=None)
+        result = run_custom_trend25(payload=trend25_config)
         step1_ok = bool(result.get("ok", False))
         if step1_ok:
             symbols_info = result.get("symbols_for_report", []) or []
