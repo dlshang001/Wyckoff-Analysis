@@ -2,8 +2,16 @@ import os
 import streamlit as st
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
-from core.constants import TABLE_USER_SETTINGS
+from core.constants import TABLE_USER_SETTINGS, TABLE_STRATEGY_CONFIGS
 from integrations.llm_client import OPENAI_COMPATIBLE_BASE_URLS
+
+
+def _to_bool(v, default: bool = True) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def reset_user_settings_state() -> None:
@@ -164,7 +172,6 @@ def save_user_settings(user_id: str, settings: dict):
     try:
         supabase = get_supabase_client()
         data = {"user_id": user_id, **settings}
-        # upsert: 存在则更新，不存在则插入
         supabase.table(TABLE_USER_SETTINGS).upsert(data).execute()
         return True
     except APIError as e:
@@ -173,3 +180,90 @@ def save_user_settings(user_id: str, settings: dict):
     except Exception as e:
         print(f"Unexpected error in save_user_settings: {e}")
         return False
+
+
+TREND25_DEFAULT_CONFIG = {
+    "only_main_board": True,
+    "exclude_chinext": True,
+    "exclude_star": True,
+    "exclude_bse": True,
+    "limit_count": 800,
+    "ma_short": 10,
+    "ma_mid": 25,
+    "min_return_pct": 15.0,
+    "max_return_5d_pct": 20.0,
+    "burst_window": 10,
+    "burst_threshold_pct": 6.0,
+    "vol_peak_ratio": 1.5,
+    "min_avg_amount_5d_yuan": 5e8,
+    "min_market_cap_yi": 10.0,
+    "enable_water_adapt": True,
+    "enable_sector_resonance": True,
+}
+
+
+def load_strategy_config(user_id: str, strategy_id: str) -> dict:
+    """
+    加载用户的策略配置（供定时任务使用，不依赖 streamlit）。
+    返回可直接传给策略引擎的 payload 字典。
+    """
+    from integrations.supabase_portfolio import get_supabase_admin_client
+
+    if not user_id or not strategy_id:
+        return dict(TREND25_DEFAULT_CONFIG)
+
+    try:
+        supabase = get_supabase_admin_client()
+        response = (
+            supabase.table(TABLE_STRATEGY_CONFIGS)
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("strategy_id", strategy_id)
+            .execute()
+        )
+
+        if response.data and len(response.data) > 0:
+            row = response.data[0]
+            config = {
+                "only_main_board": _to_bool(row.get("only_main_board"), True),
+                "exclude_chinext": _to_bool(row.get("exclude_chinext"), True),
+                "exclude_star": _to_bool(row.get("exclude_star"), True),
+                "exclude_bse": _to_bool(row.get("exclude_bse"), True),
+                "limit_count": int(row.get("limit_count") or 800),
+                "ma_short": int(row.get("ma_short") or 10),
+                "ma_mid": int(row.get("ma_mid") or 25),
+                "min_return_pct": float(row.get("min_return_pct") or 15.0),
+                "max_return_5d_pct": float(row.get("max_return_5d_pct") or 20.0),
+                "burst_window": int(row.get("burst_window") or 10),
+                "burst_threshold_pct": float(row.get("burst_threshold_pct") or 6.0),
+                "vol_peak_ratio": float(row.get("vol_peak_ratio") or 1.5),
+                "min_avg_amount_5d_yuan": float(row.get("min_avg_amount_5d_yuan") or 5e8),
+                "min_market_cap_yi": float(row.get("min_market_cap_yi") or 10.0),
+                "enable_water_adapt": _to_bool(row.get("enable_water_adapt"), True),
+                "enable_sector_resonance": _to_bool(row.get("enable_sector_resonance"), True),
+            }
+            return config
+    except Exception as e:
+        print(f"load_strategy_config error: {e}")
+
+    return dict(TREND25_DEFAULT_CONFIG)
+
+
+def save_strategy_config(user_id: str, strategy_id: str, config: dict) -> bool:
+    """保存用户的策略配置到 Supabase"""
+    try:
+        supabase = get_supabase_client()
+        data = {"user_id": user_id, "strategy_id": strategy_id, **config}
+        supabase.table(TABLE_STRATEGY_CONFIGS).upsert(data, on_conflict="user_id,strategy_id").execute()
+        return True
+    except APIError as e:
+        print(f"Supabase API Error in save_strategy_config: {e.code} - {e.message}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error in save_strategy_config: {e}")
+        return False
+
+
+def load_user_trend25_config(user_id: str) -> dict:
+    """加载用户的中期趋势策略配置（兼容旧接口）"""
+    return load_strategy_config(user_id, "custom_trend25")
