@@ -187,6 +187,42 @@ def _return_pct(close: pd.Series, lookback: int) -> float | None:
     return (end - start) / start * 100.0
 
 
+def _compute_benchmark_regime_fallback() -> dict[str, Any]:
+    from integrations.data_source import fetch_stock_hist
+
+    result = {"benchmark_regime": "UNKNOWN", "premarket_regime": "UNKNOWN"}
+    try:
+        window = _resolve_trading_window(end_calendar_day=resolve_end_calendar_day(), trading_days=250)
+        bench_df = fetch_stock_hist(symbol="000001", start=window.start_trade_date, end=window.end_trade_date, adjust="qfq")
+        if bench_df is None or bench_df.empty:
+            return result
+        b = bench_df.sort_values("date").copy()
+        b["close"] = pd.to_numeric(b["close"], errors="coerce")
+        b["pct_chg"] = pd.to_numeric(b["pct_chg"], errors="coerce")
+        if len(b) < 200:
+            return result
+        close = float(b["close"].iloc[-1])
+        ma50 = float(b["close"].rolling(50).mean().iloc[-1])
+        ma200 = float(b["close"].rolling(200).mean().iloc[-1])
+        ma50_prev = b["close"].rolling(50).mean().shift(5).iloc[-1]
+        ma50_slope_5d = None if pd.isna(ma50_prev) else float(ma50 - ma50_prev)
+        recent3 = b["pct_chg"].dropna().tail(3)
+        recent3_cum = float(((recent3 / 100.0 + 1.0).prod() - 1.0) * 100.0) if not recent3.empty else None
+
+        regime = "NEUTRAL"
+        if ma200 is not None and ma50 is not None and ma50_slope_5d is not None and recent3_cum is not None and close is not None:
+            risk_off = (close < ma200) and (ma50 < ma200) and (ma50_slope_5d < 0) and (recent3_cum <= -2.0)
+            risk_on = (close > ma50 > ma200) and (ma50_slope_5d > 0) and (recent3_cum >= 0.0)
+            if risk_off:
+                regime = "RISK_OFF"
+            elif risk_on:
+                regime = "RISK_ON"
+        result["benchmark_regime"] = regime
+    except Exception as e:
+        print(f"[custom_trend25] _compute_benchmark_regime_fallback error: {e}")
+    return result
+
+
 def _adapt_by_regime(cfg: CustomTrend25Config, regime: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
     tuned = {
         "min_avg_amount_5d_yuan": cfg.min_avg_amount_5d_yuan,
@@ -201,7 +237,13 @@ def _adapt_by_regime(cfg: CustomTrend25Config, regime: dict[str, Any] | None) ->
     row = dict(regime or {})
     bench = str(row.get("benchmark_regime", "") or "UNKNOWN").upper()
     pre = str(row.get("premarket_regime", "") or "UNKNOWN").upper()
-    context.update({"benchmark_regime": bench, "premarket_regime": pre})
+    if bench == "UNKNOWN":
+        fallback = _compute_benchmark_regime_fallback()
+        bench = str(fallback.get("benchmark_regime", "UNKNOWN") or "UNKNOWN").upper()
+        context["benchmark_regime"] = bench
+        context["premarket_regime"] = str(fallback.get("premarket_regime", "UNKNOWN") or "UNKNOWN").upper()
+    else:
+        context.update({"benchmark_regime": bench, "premarket_regime": pre})
     if not cfg.enable_water_adapt:
         return tuned, context
 
