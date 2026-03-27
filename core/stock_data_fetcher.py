@@ -263,6 +263,14 @@ class StockDataFetcher:
 
         if self.use_cache and STOCK_CACHE_ENABLED:
             meta_map = batch_get_cache_meta(symbols, adjust_key)
+            _debug_cache_hit_rate = os.getenv("DEBUG_CACHE_HIT_RATE", "").lower() in {"1", "true", "yes"}
+            if _debug_cache_hit_rate:
+                print(f"[stock_data_fetcher] batch_get_cache_meta: symbols={len(symbols)}, meta_map={len(meta_map)}, adjust={adjust_key}")
+                if meta_map:
+                    sample_key = list(meta_map.keys())[0]
+                    sample_meta = meta_map[sample_key]
+                    print(f"[stock_data_fetcher] sample meta: symbol={sample_key}, start={sample_meta.start_date}, end={sample_meta.end_date}, adjust={sample_meta.adjust}")
+                print(f"[stock_data_fetcher] request: start={start_date}, end={end_date}")
             for sym in symbols:
                 meta = meta_map.get(sym)
                 if meta is not None and meta.end_date >= end_date and meta.start_date <= start_date:
