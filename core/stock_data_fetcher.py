@@ -182,6 +182,13 @@ class StockDataFetcher:
                 )
                 actual_source = cache_meta.source
                 incremental = True
+            elif cache_meta.start_date > start_date and cache_meta.start_date <= end_date:
+                fetch_end = cache_meta.start_date - timedelta(days=1)
+                cached_df = load_cached_history(
+                    symbol, adjust_key, cache_meta.source, cache_meta.start_date, end_date
+                )
+                actual_source = cache_meta.source
+                incremental = True
 
         df = None
         source = ""
