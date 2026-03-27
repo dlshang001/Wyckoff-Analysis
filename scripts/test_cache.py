@@ -14,8 +14,18 @@ from __future__ import annotations
 import os
 import sys
 from datetime import date
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 加载 .env 文件
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(env_path)
+    print(f"[0] 已加载 .env 文件: {env_path}")
+else:
+    print(f"[0] ⚠️ 未找到 .env 文件: {env_path}")
 
 print("=" * 60)
 print("缓存功能测试")
@@ -40,13 +50,20 @@ print("    ✅ 缓存已启用")
 
 # 2. 检查 Supabase 连接
 print("\n[2] 检查 Supabase 连接...")
-from integrations.supabase_client import get_supabase_client
 
-supabase = get_supabase_client()
-if supabase is None:
-    print("    ❌ Supabase 客户端初始化失败")
-    print("    请检查环境变量: SUPABASE_URL, SUPABASE_KEY")
+# 直接创建 Supabase 客户端（不依赖 Streamlit）
+url = os.getenv("SUPABASE_URL", "").strip()
+key = os.getenv("SUPABASE_KEY", "").strip()
+
+if not url or not key:
+    print("    ❌ 未找到 SUPABASE_URL 或 SUPABASE_KEY 环境变量")
+    print(f"    SUPABASE_URL: {'已设置' if url else '未设置'}")
+    print(f"    SUPABASE_KEY: {'已设置' if key else '未设置'}")
     sys.exit(1)
+
+from supabase import create_client
+
+supabase = create_client(url, key)
 print("    ✅ Supabase 客户端初始化成功")
 
 # 3. 检查缓存表
