@@ -1,5 +1,16 @@
+# -*- coding: utf-8 -*-
+"""
+股票日线数据缓存模块
+
+三级缓存策略:
+- L1 内存缓存: 同一次运行中重复请求直接返回
+- L2 数据库缓存: Supabase 持久化存储
+- L3 API 拉取: 缓存未命中时从数据源拉取
+"""
 from __future__ import annotations
 
+import os
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -10,10 +21,46 @@ from postgrest.exceptions import APIError
 from core.constants import TABLE_STOCK_CACHE_DATA, TABLE_STOCK_CACHE_META
 from integrations.supabase_client import get_supabase_client
 
+STOCK_CACHE_ENABLED = os.getenv("STOCK_CACHE_ENABLED", "true").strip().lower() not in {
+    "0", "false", "no", "off", "disabled"
+}
+STOCK_CACHE_TTL_DAYS = int(os.getenv("STOCK_CACHE_TTL_DAYS", "30"))
+STOCK_CACHE_MAX_TRADING_DAYS = int(os.getenv("STOCK_CACHE_MAX_TRADING_DAYS", "120"))
+
+_L1_CACHE: dict[str, pd.DataFrame] = {}
+_L1_CACHE_LOCK = threading.RLock()
+
 
 def _parse_iso_datetime(value: str) -> datetime:
-    """Parse ISO datetime strings and accept trailing 'Z' timezone markers."""
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _l1_cache_key(symbol: str, adjust: str, start: date, end: date) -> str:
+    return f"{symbol}|{adjust}|{start.isoformat()}|{end.isoformat()}"
+
+
+def _l1_get(symbol: str, adjust: str, start: date, end: date) -> Optional[pd.DataFrame]:
+    if not STOCK_CACHE_ENABLED:
+        return None
+    key = _l1_cache_key(symbol, adjust, start, end)
+    with _L1_CACHE_LOCK:
+        df = _L1_CACHE.get(key)
+        if df is not None:
+            return df.copy()
+    return None
+
+
+def _l1_set(symbol: str, adjust: str, start: date, end: date, df: pd.DataFrame) -> None:
+    if not STOCK_CACHE_ENABLED or df is None or df.empty:
+        return
+    key = _l1_cache_key(symbol, adjust, start, end)
+    with _L1_CACHE_LOCK:
+        _L1_CACHE[key] = df.copy()
+
+
+def clear_l1_cache() -> None:
+    with _L1_CACHE_LOCK:
+        _L1_CACHE.clear()
 
 
 @dataclass
@@ -37,6 +84,8 @@ _COL_MAP = {
     "涨跌幅": "pct_chg",
 }
 
+_COL_MAP_REVERSE = {v: k for k, v in _COL_MAP.items()}
+
 
 def normalize_hist_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.rename(columns=_COL_MAP).copy()
@@ -51,13 +100,16 @@ def normalize_hist_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def denormalize_hist_df(df: pd.DataFrame) -> pd.DataFrame:
-    reverse = {v: k for k, v in _COL_MAP.items()}
-    out = df.rename(columns=reverse).copy()
+    out = df.rename(columns=_COL_MAP_REVERSE).copy()
     return out
 
 
 def get_cache_meta(symbol: str, adjust: str) -> Optional[CacheMeta]:
+    if not STOCK_CACHE_ENABLED:
+        return None
     supabase = get_supabase_client()
+    if supabase is None:
+        return None
     try:
         resp = (
             supabase.table(TABLE_STOCK_CACHE_META)
@@ -85,6 +137,46 @@ def get_cache_meta(symbol: str, adjust: str) -> Optional[CacheMeta]:
         return None
 
 
+def batch_get_cache_meta(symbols: list[str], adjust: str) -> dict[str, CacheMeta]:
+    """
+    批量查询多只股票的缓存元数据
+    返回: {symbol: CacheMeta}
+    """
+    if not STOCK_CACHE_ENABLED or not symbols:
+        return {}
+    supabase = get_supabase_client()
+    if supabase is None:
+        return {}
+    result: dict[str, CacheMeta] = {}
+    try:
+        resp = (
+            supabase.table(TABLE_STOCK_CACHE_META)
+            .select("symbol,adjust,source,start_date,end_date,updated_at")
+            .in_("symbol", symbols[:500])
+            .eq("adjust", adjust)
+            .execute()
+        )
+        if not resp.data:
+            return {}
+        seen = set()
+        for row in resp.data:
+            sym = row["symbol"]
+            if sym in seen:
+                continue
+            seen.add(sym)
+            result[sym] = CacheMeta(
+                symbol=sym,
+                adjust=row["adjust"],
+                source=row["source"],
+                start_date=_parse_iso_datetime(row["start_date"]).date(),
+                end_date=_parse_iso_datetime(row["end_date"]).date(),
+                updated_at=_parse_iso_datetime(row["updated_at"]),
+            )
+    except Exception:
+        pass
+    return result
+
+
 def load_cached_history(
     symbol: str,
     adjust: str,
@@ -92,7 +184,11 @@ def load_cached_history(
     start_date: date,
     end_date: date,
 ) -> Optional[pd.DataFrame]:
+    if not STOCK_CACHE_ENABLED:
+        return None
     supabase = get_supabase_client()
+    if supabase is None:
+        return None
     try:
         resp = (
             supabase.table(TABLE_STOCK_CACHE_DATA)
@@ -120,10 +216,15 @@ def upsert_cache_data(
     source: str,
     df: pd.DataFrame,
 ) -> None:
-    if df is None or df.empty:
+    if not STOCK_CACHE_ENABLED or df is None or df.empty:
         return
     supabase = get_supabase_client()
-    payload = df.copy()
+    if supabase is None:
+        return
+    normalized = normalize_hist_df(df)
+    if normalized.empty:
+        return
+    payload = normalized.copy()
     payload["symbol"] = symbol
     payload["adjust"] = adjust
     payload["source"] = source
@@ -142,7 +243,11 @@ def upsert_cache_meta(
     start_date: date,
     end_date: date,
 ) -> None:
+    if not STOCK_CACHE_ENABLED:
+        return
     supabase = get_supabase_client()
+    if supabase is None:
+        return
     payload = {
         "symbol": symbol,
         "adjust": adjust,
@@ -157,9 +262,30 @@ def upsert_cache_meta(
         return
 
 
-def cleanup_cache(ttl_days: int = 30) -> None:
+def delete_old_cache_data(symbol: str, adjust: str, before_date: date) -> None:
+    """删除指定日期之前的缓存数据"""
+    if not STOCK_CACHE_ENABLED:
+        return
     supabase = get_supabase_client()
-    cutoff = datetime.utcnow() - timedelta(days=ttl_days)
+    if supabase is None:
+        return
+    try:
+        supabase.table(TABLE_STOCK_CACHE_DATA).delete().eq("symbol", symbol).eq(
+            "adjust", adjust
+        ).lt("date", before_date.isoformat()).execute()
+    except Exception:
+        pass
+
+
+def cleanup_cache(ttl_days: int | None = None) -> None:
+    """清理过期缓存数据"""
+    if not STOCK_CACHE_ENABLED:
+        return
+    ttl = ttl_days or STOCK_CACHE_TTL_DAYS
+    supabase = get_supabase_client()
+    if supabase is None:
+        return
+    cutoff = datetime.utcnow() - timedelta(days=ttl)
     cutoff_iso = cutoff.isoformat()
     try:
         supabase.table(TABLE_STOCK_CACHE_DATA).delete().lt(
@@ -173,3 +299,58 @@ def cleanup_cache(ttl_days: int = 30) -> None:
         ).execute()
     except Exception:
         pass
+
+
+def trim_cache_to_max_days(symbol: str, adjust: str, max_days: int | None = None) -> None:
+    """将缓存数据裁剪到最大天数"""
+    max_days = max_days or STOCK_CACHE_MAX_TRADING_DAYS
+    if max_days <= 0:
+        return
+    supabase = get_supabase_client()
+    if supabase is None:
+        return
+    try:
+        resp = (
+            supabase.table(TABLE_STOCK_CACHE_DATA)
+            .select("date")
+            .eq("symbol", symbol)
+            .eq("adjust", adjust)
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return
+        latest_date = _parse_iso_datetime(resp.data[0]["date"]).date()
+        cutoff_date = latest_date - timedelta(days=max_days * 2)
+        delete_old_cache_data(symbol, adjust, cutoff_date)
+    except Exception:
+        pass
+
+
+def get_cache_stats() -> dict:
+    """获取缓存统计信息"""
+    supabase = get_supabase_client()
+    if supabase is None:
+        return {"enabled": STOCK_CACHE_ENABLED, "error": "no_supabase_client"}
+    try:
+        meta_resp = (
+            supabase.table(TABLE_STOCK_CACHE_META)
+            .select("symbol", count="exact")
+            .limit(1)
+            .execute()
+        )
+        data_resp = (
+            supabase.table(TABLE_STOCK_CACHE_DATA)
+            .select("symbol", count="exact")
+            .limit(1)
+            .execute()
+        )
+        return {
+            "enabled": STOCK_CACHE_ENABLED,
+            "meta_count": getattr(meta_resp, "count", 0) or 0,
+            "data_count": getattr(data_resp, "count", 0) or 0,
+            "l1_cache_size": len(_L1_CACHE),
+        }
+    except Exception as e:
+        return {"enabled": STOCK_CACHE_ENABLED, "error": str(e)}

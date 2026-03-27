@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any
 
 import pandas as pd
 
+from core.stock_data_fetcher import StockDataFetcher
 from core.wyckoff_engine import normalize_hist_from_fetch
-from integrations.data_source import fetch_market_cap_map, fetch_sector_map, fetch_stock_hist
+from integrations.data_source import fetch_market_cap_map, fetch_sector_map
 from integrations.fetch_a_share_csv import get_all_stocks, _resolve_trading_window
 from integrations.supabase_market_signal import load_latest_market_signal_daily
 from utils.trading_clock import resolve_end_calendar_day
@@ -357,13 +357,20 @@ def run_custom_trend25(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     regime_row = load_latest_market_signal_daily()
     tuned, regime_context = _adapt_by_regime(cfg, regime_row)
 
-    df_map: dict[str, pd.DataFrame] = {}
-    with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
-        futures = [ex.submit(_fetch_one, sym, window) for sym in symbols]
-        for fut in as_completed(futures):
-            code, df = fut.result()
-            if df is not None and not df.empty:
-                df_map[code] = df
+    fetcher = StockDataFetcher(max_workers=cfg.max_workers)
+    df_map, fetch_summary = fetcher.fetch_all(
+        symbols=symbols,
+        start_date=window.start_trade_date,
+        end_date=window.end_trade_date,
+        adjust="qfq",
+    )
+
+    for sym in list(df_map.keys()):
+        df = df_map[sym]
+        if df is not None and not df.empty:
+            df_map[sym] = normalize_hist_from_fetch(df)
+        else:
+            del df_map[sym]
 
     rows: list[dict[str, Any]] = []
     for sym, df in df_map.items():
@@ -402,6 +409,8 @@ def run_custom_trend25(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "fetched_symbols": len(df_map),
             "selected_symbols": len(rows),
             "top_sectors": top_sectors,
+            "cache_hit_rate": fetch_summary.cache_hit_rate,
+            "fetch_elapsed_seconds": fetch_summary.elapsed_seconds,
         },
         "symbols_for_report": rows,
     }

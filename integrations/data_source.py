@@ -19,7 +19,7 @@ import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Literal
@@ -28,6 +28,8 @@ from http.client import RemoteDisconnected
 import pandas as pd
 
 
+_L1_CACHE: dict[str, pd.DataFrame] = {}
+_L1_CACHE_LOCK = threading.RLock()
 _BAOSTOCK_LOGGED = False
 _BAOSTOCK_EXIT_HOOKED = False
 _BAOSTOCK_MODULE = None
@@ -54,6 +56,27 @@ _AKSHARE_RETRY_SLEEP_SECONDS = float(os.getenv("AKSHARE_RETRY_SLEEP_SECONDS", "0
 _BAOSTOCK_CONSEC_FAILS = 0
 _BAOSTOCK_CIRCUIT_OPEN = False
 _BAOSTOCK_CIRCUIT_NOTE = ""
+
+
+def _l1_cache_key(symbol: str, adjust: str, start: date, end: date) -> str:
+    return f"{symbol}|{adjust}|{start.isoformat()}|{end.isoformat()}"
+
+
+def _l1_get(symbol: str, adjust: str, start: date, end: date) -> pd.DataFrame | None:
+    key = _l1_cache_key(symbol, adjust, start, end)
+    with _L1_CACHE_LOCK:
+        df = _L1_CACHE.get(key)
+        if df is not None:
+            return df.copy()
+    return None
+
+
+def _l1_set(symbol: str, adjust: str, start: date, end: date, df: pd.DataFrame) -> None:
+    if df is None or df.empty:
+        return
+    key = _l1_cache_key(symbol, adjust, start, end)
+    with _L1_CACHE_LOCK:
+        _L1_CACHE[key] = df.copy()
 
 
 def _debug_source_fail(source: str, err: Exception) -> None:
@@ -634,15 +657,39 @@ def fetch_stock_hist(
     start: str | date,
     end: str | date,
     adjust: Literal["", "qfq", "hfq"] = "qfq",
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     """
-    个股日线：tushare 优先（固定 qfq），失败时回退 akshare/baostock/efinance。
-    可用环境变量按需禁用数据源：
-    - DATA_SOURCE_DISABLE_AKSHARE=1
-    - DATA_SOURCE_DISABLE_BAOSTOCK=1
-    - DATA_SOURCE_DISABLE_EFINANCE=1
+    个股日线：支持三级缓存 + 增量更新
+
+    缓存策略:
+    - L1 内存缓存: 同一次运行中重复请求直接返回
+    - L2 数据库缓存: Supabase 持久化存储
+    - L3 API 拉取: 缓存未命中时从数据源拉取
+
+    增量更新:
+    - 如果缓存部分覆盖，只拉取缺失日期的数据
+    - 合并缓存数据和新拉取的数据
+
+    参数:
+        symbol: 股票代码
+        start: 开始日期
+        end: 结束日期
+        adjust: 复权类型 (qfq/hfq/"")
+        use_cache: 是否使用缓存 (默认 True)
+
     返回列：日期, 开盘, 最高, 最低, 收盘, 成交量, 成交额, 涨跌幅, 换手率, 振幅
     """
+    start_date = start if isinstance(start, date) else date.fromisoformat(str(start).replace("-", "")[:4] + "-" + str(start).replace("-", "")[4:6] + "-" + str(start).replace("-", "")[6:8]) if len(str(start).replace("-", "")) == 8 else date.today()
+    end_date = end if isinstance(end, date) else date.fromisoformat(str(end).replace("-", "")[:4] + "-" + str(end).replace("-", "")[4:6] + "-" + str(end).replace("-", "")[6:8]) if len(str(end).replace("-", "")) == 8 else date.today()
+
+    adjust_key = adjust or "none"
+
+    if use_cache:
+        l1_cached = _l1_get(symbol, adjust_key, start_date, end_date)
+        if l1_cached is not None:
+            return l1_cached
+
     start_s = (
         start.strftime("%Y%m%d")
         if isinstance(start, date)
@@ -652,18 +699,53 @@ def fetch_stock_hist(
         end.strftime("%Y%m%d") if isinstance(end, date) else str(end).replace("-", "")
     )
 
+    cache_meta = None
+    cached_df = None
+    fetch_start_date = start_date
+    fetch_end_date = end_date
+    actual_source = ""
+
+    if use_cache:
+        from core.stock_cache import get_cache_meta, load_cached_history
+        cache_meta = get_cache_meta(symbol, adjust_key)
+
+        if cache_meta is not None:
+            if cache_meta.end_date >= end_date and cache_meta.start_date <= start_date:
+                cached_df = load_cached_history(
+                    symbol, adjust_key, cache_meta.source, start_date, end_date
+                )
+                if cached_df is not None and not cached_df.empty:
+                    from core.stock_cache import denormalize_hist_df
+                    result = denormalize_hist_df(cached_df)
+                    result = _ensure_output_columns(result)
+                    _l1_set(symbol, adjust_key, start_date, end_date, result)
+                    return _tag_source(result, f"{cache_meta.source}(cached)")
+            elif cache_meta.end_date >= start_date and cache_meta.end_date < end_date:
+                fetch_start_date = cache_meta.end_date + timedelta(days=1)
+                cached_df = load_cached_history(
+                    symbol, adjust_key, cache_meta.source, start_date, cache_meta.end_date
+                )
+                actual_source = cache_meta.source
+                fetch_start_s = fetch_start_date.strftime("%Y%m%d")
+                fetch_end_s = fetch_end_date.strftime("%Y%m%d")
+            else:
+                cache_meta = None
+
     failed_sources: list[str] = []
     failed_details: list[str] = []
     from utils.tushare_client import get_pro
 
     pro = get_pro()
+    df = None
+    source = ""
 
-    # 1) tushare 优先（固定 qfq）
+    fetch_start_s = fetch_start_date.strftime("%Y%m%d")
+    fetch_end_s = fetch_end_date.strftime("%Y%m%d")
+
     if pro is not None:
         try:
-            return _tag_source(
-                _fetch_stock_tushare(symbol, start_s, end_s, "qfq"), "tushare"
-            )
+            df = _fetch_stock_tushare(symbol, fetch_start_s, fetch_end_s, "qfq")
+            source = "tushare"
         except Exception as e:
             _debug_source_fail("tushare", e)
             failed_sources.append("tushare")
@@ -691,17 +773,13 @@ def fetch_stock_hist(
         "on",
     }
 
-    # 2. akshare
-    if disable_akshare:
-        failed_sources.append("akshare(disabled)")
-        failed_details.append("akshare=disabled_by_env")
-    else:
+    if df is None and not disable_akshare:
         last_akshare_err: Exception | None = None
         for attempt in range(1, _AKSHARE_RETRY_TIMES + 1):
             try:
-                return _tag_source(
-                    _fetch_stock_akshare(symbol, start_s, end_s, adjust), "akshare"
-                )
+                df = _fetch_stock_akshare(symbol, fetch_start_s, fetch_end_s, adjust)
+                source = "akshare"
+                break
             except ModuleNotFoundError as e:
                 _debug_source_fail("akshare", e)
                 failed_sources.append(f"akshare(缺少依赖 {e.name})")
@@ -718,26 +796,18 @@ def fetch_stock_hist(
                 failed_details.append(f"akshare={_compact_error(e)}")
                 break
 
-    # 3. baostock (仅前复权)
     baostock_circuit_open, baostock_circuit_note = _baostock_circuit_state()
-    if disable_baostock:
-        failed_sources.append("baostock(disabled)")
-        failed_details.append("baostock=disabled_by_env")
-    elif baostock_circuit_open:
-        note = baostock_circuit_note or "circuit_open"
-        failed_sources.append("baostock(circuit_open)")
-        failed_details.append(f"baostock={note}")
-    else:
+    if df is None and not disable_baostock and not baostock_circuit_open:
         started = time.monotonic()
         try:
-            df = _fetch_stock_baostock(symbol, start_s, end_s)
+            df = _fetch_stock_baostock(symbol, fetch_start_s, fetch_end_s)
             elapsed = time.monotonic() - started
             if _BAOSTOCK_MAX_SECONDS > 0 and elapsed > _BAOSTOCK_MAX_SECONDS:
                 raise TimeoutError(
                     f"baostock slow={elapsed:.2f}s > {_BAOSTOCK_MAX_SECONDS:.2f}s"
                 )
             _baostock_mark_success()
-            return _tag_source(df, "baostock")
+            source = "baostock"
         except ModuleNotFoundError as e:
             _debug_source_fail("baostock", e)
             _baostock_mark_failure(_compact_error(e))
@@ -749,13 +819,10 @@ def fetch_stock_hist(
             failed_sources.append("baostock")
             failed_details.append(f"baostock={_compact_error(e)}")
 
-    # 4. efinance (仅前复权)
-    if disable_efinance:
-        failed_sources.append("efinance(disabled)")
-        failed_details.append("efinance=disabled_by_env")
-    else:
+    if df is None and not disable_efinance:
         try:
-            return _tag_source(_fetch_stock_efinance(symbol, start_s, end_s), "efinance")
+            df = _fetch_stock_efinance(symbol, fetch_start_s, fetch_end_s)
+            source = "efinance"
         except ModuleNotFoundError as e:
             _debug_source_fail("efinance", e)
             failed_sources.append(f"efinance(未安装: {e.name})")
@@ -765,17 +832,47 @@ def fetch_stock_hist(
             failed_sources.append("efinance")
             failed_details.append(f"efinance={_compact_error(e)}")
 
-    detail_suffix = (
-        f" 失败详情：{'；'.join(failed_details[:4])}。"
-        if failed_details
-        else ""
-    )
-    hint = _network_hint_from_details(failed_details)
-    hint_suffix = f" 诊断提示：{hint}" if hint else ""
-    raise RuntimeError(
-        f"数据拉取全线失败 [标:{symbol}, 范围:{start_s}..{end_s}, 复权:{adjust}]：已按顺序尝试 tushare→akshare→baostock→efinance，"
-        f"均无可用 K 线数据。请检查该标的是否已退市或处于长期停牌期。{detail_suffix}{hint_suffix}"
-    )
+    if df is None:
+        detail_suffix = (
+            f" 失败详情：{'；'.join(failed_details[:4])}。"
+            if failed_details
+            else ""
+        )
+        hint = _network_hint_from_details(failed_details)
+        hint_suffix = f" 诊断提示：{hint}" if hint else ""
+        raise RuntimeError(
+            f"所有数据源均拉取失败：{symbol} {fetch_start_s}-{fetch_end_s}。"
+            f"已尝试：{', '.join(failed_sources)}。{detail_suffix}{hint_suffix}"
+        )
+
+    if cached_df is not None and not cached_df.empty:
+        from core.stock_cache import normalize_hist_df, denormalize_hist_df
+        new_normalized = normalize_hist_df(df)
+        combined = pd.concat([cached_df, new_normalized], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["date"], keep="last")
+        combined = combined.sort_values("date").reset_index(drop=True)
+        df = denormalize_hist_df(combined)
+        source = actual_source or source
+
+    df = _ensure_output_columns(df)
+
+    if use_cache and df is not None and not df.empty:
+        from core.stock_cache import upsert_cache_data, upsert_cache_meta
+        upsert_cache_data(symbol, adjust_key, source, df)
+        upsert_cache_meta(symbol, adjust_key, source, start_date, end_date)
+
+    _l1_set(symbol, adjust_key, start_date, end_date, df)
+
+    return _tag_source(df, source)
+
+
+def _ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """确保输出包含所有必需列"""
+    required = ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额", "涨跌幅", "换手率", "振幅"]
+    for col in required:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df[required].copy()
 
 
 # --- 大盘指数 ---
