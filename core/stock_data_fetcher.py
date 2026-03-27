@@ -233,9 +233,17 @@ class StockDataFetcher:
         start_date: date,
         end_date: date,
         adjust: Literal["", "qfq", "hfq"] = "qfq",
+        use_batch_mode: bool = True,
     ) -> tuple[dict[str, pd.DataFrame], BatchFetchSummary]:
         """
         批量拉取股票数据
+
+        Args:
+            symbols: 股票代码列表
+            start_date: 开始日期
+            end_date: 结束日期
+            adjust: 复权方式
+            use_batch_mode: 是否使用批量模式（按交易日获取，更高效）
 
         返回: (df_map, summary)
         - df_map: {symbol: DataFrame}
@@ -263,13 +271,6 @@ class StockDataFetcher:
 
         if self.use_cache and STOCK_CACHE_ENABLED:
             meta_map = batch_get_cache_meta(symbols, adjust_key)
-            print(f"[stock_data_fetcher] DEBUG: use_cache={self.use_cache}, STOCK_CACHE_ENABLED={STOCK_CACHE_ENABLED}")
-            print(f"[stock_data_fetcher] DEBUG: batch_get_cache_meta returned {len(meta_map)} metas for {len(symbols)} symbols, adjust={adjust_key}")
-            if meta_map:
-                sample_key = list(meta_map.keys())[0]
-                sample_meta = meta_map[sample_key]
-                print(f"[stock_data_fetcher] DEBUG: sample meta: symbol={sample_key}, start={sample_meta.start_date}, end={sample_meta.end_date}, adjust={sample_meta.adjust}")
-            print(f"[stock_data_fetcher] DEBUG: request: start={start_date}, end={end_date}")
             for sym in symbols:
                 meta = meta_map.get(sym)
                 if meta is not None and meta.end_date >= end_date and meta.start_date <= start_date:
@@ -277,7 +278,6 @@ class StockDataFetcher:
                 else:
                     uncached_symbols.append(sym)
         else:
-            print(f"[stock_data_fetcher] DEBUG: cache disabled! use_cache={self.use_cache}, STOCK_CACHE_ENABLED={STOCK_CACHE_ENABLED}")
             uncached_symbols = list(symbols)
 
         for sym in cached_symbols:
@@ -295,34 +295,47 @@ class StockDataFetcher:
                 uncached_symbols.append(sym)
 
         if uncached_symbols:
-            total = len(uncached_symbols)
-            completed = 0
-
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {
-                    executor.submit(self.fetch_one, sym, start_date, end_date, adjust): sym
-                    for sym in uncached_symbols
-                }
-
-                for future in as_completed(futures):
-                    sym = futures[future]
-                    completed += 1
-
-                    try:
-                        result = future.result()
-                        if result.df is not None and not result.df.empty:
-                            df_map[sym] = result.df
-                            if result.from_cache:
-                                cached_count += 1
-                            else:
-                                fetched_count += 1
-                        else:
-                            failed_count += 1
-                    except Exception:
+            if use_batch_mode and len(uncached_symbols) >= 100:
+                print(f"[stock_data_fetcher] 使用批量模式获取 {len(uncached_symbols)} 只股票数据...")
+                batch_df_map = self._fetch_batch_by_trade_date(
+                    uncached_symbols, start_date, end_date, adjust
+                )
+                
+                for sym in uncached_symbols:
+                    if sym in batch_df_map and batch_df_map[sym] is not None and not batch_df_map[sym].empty:
+                        df_map[sym] = batch_df_map[sym]
+                        fetched_count += 1
+                    else:
                         failed_count += 1
+            else:
+                total = len(uncached_symbols)
+                completed = 0
 
-                    if self.progress_callback:
-                        self.progress_callback(completed, total, sym)
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    futures = {
+                        executor.submit(self.fetch_one, sym, start_date, end_date, adjust): sym
+                        for sym in uncached_symbols
+                    }
+
+                    for future in as_completed(futures):
+                        sym = futures[future]
+                        completed += 1
+
+                        try:
+                            result = future.result()
+                            if result.df is not None and not result.df.empty:
+                                df_map[sym] = result.df
+                                if result.from_cache:
+                                    cached_count += 1
+                                else:
+                                    fetched_count += 1
+                            else:
+                                failed_count += 1
+                        except Exception:
+                            failed_count += 1
+
+                        if self.progress_callback:
+                            self.progress_callback(completed, total, sym)
 
         elapsed = time.monotonic() - start_time
         total = len(symbols)
@@ -338,6 +351,46 @@ class StockDataFetcher:
         )
 
         return df_map, summary
+
+    def _fetch_batch_by_trade_date(
+        self,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+        adjust: Literal["", "qfq", "hfq"] = "qfq",
+    ) -> dict[str, pd.DataFrame]:
+        """
+        按交易日批量获取数据（高效模式）
+        
+        使用 pro.daily(trade_date=...) 按交易日获取，
+        每个交易日只需一次请求，大幅减少 API 调用次数。
+        """
+        from integrations.data_source import fetch_all_stocks_by_trade_date
+        
+        batch_df_map = fetch_all_stocks_by_trade_date(
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+        )
+        
+        result: dict[str, pd.DataFrame] = {}
+        for sym in symbols:
+            if sym in batch_df_map:
+                df = batch_df_map[sym]
+                if df is not None and not df.empty:
+                    self._l1_set(sym, adjust or "none", start_date, end_date, df)
+                    
+                    if self.use_cache:
+                        source = str(df.attrs.get("source") or "tushare")
+                        upsert_cache_data(sym, adjust or "none", source, df)
+                        upsert_cache_meta(sym, adjust or "none", source, start_date, end_date)
+                        
+                        if self.max_trading_days > 0:
+                            trim_cache_to_max_days(sym, adjust or "none", self.max_trading_days)
+                    
+                    result[sym] = df
+        
+        return result
 
     def get_stats(self) -> dict:
         """获取缓存统计信息"""

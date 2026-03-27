@@ -1055,3 +1055,187 @@ def fetch_market_cap_map() -> dict[str, float]:
             _debug_source_fail("market_cap_cache_write", e)
 
     return mapping
+
+
+def fetch_all_stocks_by_trade_date(
+    start_date: date | str,
+    end_date: date | str,
+    adjust: Literal["", "qfq", "hfq"] = "qfq",
+) -> dict[str, pd.DataFrame]:
+    """
+    按交易日批量获取全市场股票数据（高效模式）
+    
+    使用 pro.daily(trade_date=...) 按交易日获取，每个交易日只需一次请求。
+    相比逐只股票请求，大幅减少 API 调用次数。
+    
+    Args:
+        start_date: 开始日期
+        end_date: 结束日期
+        adjust: 复权方式 (qfq=前复权, hfq=后复权, ""=不复权)
+    
+    Returns:
+        dict[str, pd.DataFrame]: {symbol: DataFrame}
+    """
+    from utils.tushare_client import get_pro
+    from utils.trade_calendar import get_trade_dates
+    
+    pro = get_pro()
+    if pro is None:
+        print("[fetch_all_stocks_by_trade_date] TUSHARE_TOKEN 未配置，无法使用批量模式")
+        return {}
+    
+    start_s = start_date.strftime("%Y%m%d") if isinstance(start_date, date) else str(start_date).replace("-", "")
+    end_s = end_date.strftime("%Y%m%d") if isinstance(end_date, date) else str(end_date).replace("-", "")
+    
+    trade_dates = get_trade_dates(start_s, end_s)
+    if not trade_dates:
+        print(f"[fetch_all_stocks_by_trade_date] 未找到交易日: {start_s} ~ {end_s}")
+        return {}
+    
+    print(f"[fetch_all_stocks_by_trade_date] 获取 {len(trade_dates)} 个交易日数据...")
+    
+    all_data: dict[str, list[dict]] = {}
+    
+    for i, trade_date in enumerate(trade_dates):
+        if _DATA_SOURCE_DEBUG:
+            print(f"[fetch_all_stocks_by_trade_date] ({i+1}/{len(trade_dates)}) {trade_date}")
+        
+        try:
+            df = pro.daily(trade_date=trade_date)
+            if df is None or df.empty:
+                continue
+            
+            for _, row in df.iterrows():
+                ts_code = str(row["ts_code"])
+                sym = _ts_code_to_symbol(ts_code)
+                if not sym:
+                    continue
+                
+                if sym not in all_data:
+                    all_data[sym] = []
+                
+                all_data[sym].append({
+                    "日期": str(row["trade_date"])[:4] + "-" + str(row["trade_date"])[4:6] + "-" + str(row["trade_date"])[6:8],
+                    "开盘": row.get("open"),
+                    "最高": row.get("high"),
+                    "最低": row.get("low"),
+                    "收盘": row.get("close"),
+                    "成交量": pd.to_numeric(row.get("vol", 0), errors="coerce") * 100,
+                    "成交额": pd.to_numeric(row.get("amount", 0), errors="coerce") * 1000,
+                    "涨跌幅": row.get("pct_chg"),
+                    "换手率": pd.NA,
+                    "振幅": pd.NA,
+                })
+            
+            time.sleep(0.12)
+            
+        except Exception as e:
+            _debug_source_fail(f"pro.daily({trade_date})", e)
+            continue
+    
+    if adjust == "qfq":
+        print(f"[fetch_all_stocks_by_trade_date] 获取前复权因子...")
+        adj_factor_map = _fetch_adj_factors_batch(list(all_data.keys()), start_s, end_s)
+    else:
+        adj_factor_map = {}
+    
+    result: dict[str, pd.DataFrame] = {}
+    for sym, records in all_data.items():
+        df = pd.DataFrame(records)
+        df = df.sort_values("日期").reset_index(drop=True)
+        
+        if adjust == "qfq" and sym in adj_factor_map:
+            adj_factors = adj_factor_map[sym]
+            df = _apply_adj_factor(df, adj_factors)
+        
+        df = _ensure_output_columns(df)
+        df.attrs["source"] = "tushare"
+        result[sym] = df
+    
+    print(f"[fetch_all_stocks_by_trade_date] 完成，获取 {len(result)} 只股票")
+    return result
+
+
+def _fetch_adj_factors_batch(
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+) -> dict[str, pd.DataFrame]:
+    """
+    批量获取前复权因子
+    """
+    from utils.tushare_client import get_pro
+    
+    pro = get_pro()
+    if pro is None:
+        return {}
+    
+    ts_codes = [_to_ts_code(sym) for sym in symbols]
+    
+    all_factors: dict[str, list[dict]] = {}
+    
+    batch_size = 500
+    for i in range(0, len(ts_codes), batch_size):
+        batch = ts_codes[i:i + batch_size]
+        try:
+            df = pro.adj_factor(
+                ts_code=",".join(batch),
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if df is None or df.empty:
+                continue
+            
+            for _, row in df.iterrows():
+                ts_code = str(row["ts_code"])
+                sym = _ts_code_to_symbol(ts_code)
+                if not sym:
+                    continue
+                
+                if sym not in all_factors:
+                    all_factors[sym] = []
+                
+                all_factors[sym].append({
+                    "trade_date": str(row["trade_date"]),
+                    "adj_factor": row.get("adj_factor"),
+                })
+            
+            time.sleep(0.12)
+            
+        except Exception as e:
+            _debug_source_fail(f"pro.adj_factor batch", e)
+            continue
+    
+    result: dict[str, pd.DataFrame] = {}
+    for sym, records in all_factors.items():
+        df = pd.DataFrame(records)
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        result[sym] = df
+    
+    return result
+
+
+def _apply_adj_factor(df: pd.DataFrame, adj_factors: pd.DataFrame) -> pd.DataFrame:
+    """
+    应用前复权因子
+    """
+    if adj_factors.empty:
+        return df
+    
+    df = df.copy()
+    df["日期_str"] = df["日期"].str.replace("-", "")
+    
+    factor_map = dict(zip(
+        adj_factors["trade_date"].astype(str),
+        adj_factors["adj_factor"].astype(float)
+    ))
+    
+    df["adj_factor"] = df["日期_str"].map(factor_map)
+    df["adj_factor"] = df["adj_factor"].fillna(method="ffill").fillna(1.0)
+    
+    for col in ["开盘", "最高", "最低", "收盘"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce") * df["adj_factor"]
+    
+    df = df.drop(columns=["日期_str", "adj_factor"], errors="ignore")
+    return df

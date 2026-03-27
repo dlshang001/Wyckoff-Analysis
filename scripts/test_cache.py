@@ -190,6 +190,7 @@ try:
         start_date=test_start,
         end_date=test_end,
         adjust="qfq",
+        use_batch_mode=False,
     )
     print(f"    结果: {len(df_map)} 只股票")
     print(f"    缓存命中率: {summary.cache_hit_rate:.1%}")
@@ -201,6 +202,24 @@ try:
         print("    ⚠️ 缓存未命中")
 except Exception as e:
     print(f"    ❌ 拉取失败: {e}")
+
+# 9. 测试批量模式
+print("\n[9] 测试批量模式（按交易日获取）...")
+test_symbols_batch = ["000001", "000002", "600000", "600519", "300750"]
+print(f"    拉取 {len(test_symbols_batch)} 只股票数据（批量模式）...")
+try:
+    df_map_batch, summary_batch = fetcher.fetch_all(
+        symbols=test_symbols_batch,
+        start_date=test_start,
+        end_date=test_end,
+        adjust="qfq",
+        use_batch_mode=True,
+    )
+    print(f"    结果: {len(df_map_batch)} 只股票")
+    print(f"    耗时: {summary_batch.elapsed_seconds:.2f}s")
+    print("    ✅ 批量模式正常")
+except Exception as e:
+    print(f"    ❌ 批量模式失败: {e}")
 
 print("\n" + "=" * 60)
 print("测试完成")

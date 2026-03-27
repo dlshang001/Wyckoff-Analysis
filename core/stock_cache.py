@@ -149,17 +149,13 @@ def batch_get_cache_meta(symbols: list[str], adjust: str) -> dict[str, CacheMeta
     返回: {symbol: CacheMeta}
     """
     if not STOCK_CACHE_ENABLED or not symbols:
-        print(f"[stock_cache] batch_get_cache_meta: early return, STOCK_CACHE_ENABLED={STOCK_CACHE_ENABLED}, symbols={len(symbols) if symbols else 0}")
         return {}
     supabase = get_supabase_client()
     if supabase is None:
-        print(f"[stock_cache] batch_get_cache_meta: supabase client is None")
         return {}
     result: dict[str, CacheMeta] = {}
     try:
         batch_size = 500
-        total_queries = (len(symbols) + batch_size - 1) // batch_size
-        print(f"[stock_cache] batch_get_cache_meta: querying {len(symbols)} symbols in {total_queries} batches, adjust={adjust}")
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
             resp = (
@@ -183,9 +179,7 @@ def batch_get_cache_meta(symbols: list[str], adjust: str) -> dict[str, CacheMeta
                     end_date=_parse_iso_datetime(row["end_date"]).date(),
                     updated_at=_parse_iso_datetime(row["updated_at"]),
                 )
-        print(f"[stock_cache] batch_get_cache_meta: returned {len(result)} metas")
-    except Exception as e:
-        print(f"[stock_cache] batch_get_cache_meta failed: {e}")
+    except Exception:
         pass
     return result
 
