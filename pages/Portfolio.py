@@ -657,7 +657,7 @@ with content_col:
 
             editor_df = st.data_editor(
                 _to_editor_df(positions),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 num_rows="dynamic",
                 column_config={
@@ -695,7 +695,7 @@ with content_col:
 
             submitted = st.form_submit_button(
                 "💾 保存当前账号持仓",
-                use_container_width=True,
+                width="stretch",
                 disabled=edit_locked,
             )
             if submitted:
@@ -827,7 +827,7 @@ with content_col:
                 }
                 st.dataframe(
                     ref_df[display_cols].rename(columns=rename_map),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -859,9 +859,9 @@ with content_col:
                                 "state_sig": "持仓签名",
                             }
                         ),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
-    if st.button("🔄 重新加载", use_container_width=True):
+    if st.button("🔄 重新加载", width="stretch"):
         st.rerun()

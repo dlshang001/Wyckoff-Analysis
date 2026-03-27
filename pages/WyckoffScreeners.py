@@ -138,7 +138,7 @@ def _render_funnel_result(result: dict, is_newly_completed: bool = False) -> Non
                     "风控": str(item.get("exit_signal", "") or "-"),
                 }
             )
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         st.page_link("pages/AIAnalysis.py", label="前往 AI 分析页使用这批候选", icon="🤖")
     else:
         st.caption("无 AI 候选。")
@@ -159,7 +159,7 @@ def _render_funnel_result(result: dict, is_newly_completed: bool = False) -> Non
             }
             for row in rows
         ]
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True)
 
     benchmark_context = result.get("benchmark_context", {}) or {}
     if benchmark_context:
@@ -264,7 +264,7 @@ def _render_custom_result(result: dict, is_newly_completed: bool = False) -> Non
                     "量峰比": round(float(item.get("vol_peak_ratio", 0.0) or 0.0), 2),
                 }
             )
-        st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
         st.session_state["ai_find_gold_background_symbols"] = symbols
         st.page_link("pages/AIAnalysis.py", label="前往 AI 分析页使用这批候选", icon="🤖")
     else:

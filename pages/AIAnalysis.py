@@ -224,7 +224,7 @@ with content_col:
                 pd.DataFrame(
                     [{"代码": x["code"], "名称": x["name"]} for x in selected_symbols_info]
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
     else:
@@ -260,7 +260,7 @@ with content_col:
                             for row in selected_symbols_info
                         ]
                     ),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 

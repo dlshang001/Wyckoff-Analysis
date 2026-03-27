@@ -178,7 +178,7 @@ with content_col:
             lambda v: "color: #16a34a; font-weight: 700;" if v == "是" else "color: #6b7280;",
             subset=["AI推荐"]
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=600
     )

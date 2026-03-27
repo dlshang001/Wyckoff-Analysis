@@ -20,7 +20,7 @@ def show_right_nav():
         st.link_button(
             "⭐ GitHub",
             "https://github.com/YoungCan-Wang/Wyckoff-Analysis",
-            use_container_width=True,
+            width="stretch",
         )
         st.divider()
     return st.container()
