@@ -31,8 +31,14 @@ _L1_CACHE: dict[str, pd.DataFrame] = {}
 _L1_CACHE_LOCK = threading.RLock()
 
 
+import re
+
+
 def _parse_iso_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    s = str(value).replace("Z", "+00:00")
+    s = re.sub(r"\.(\d{1,6})", lambda m: f".{m.group(1):0<6}", s)
+    s = re.sub(r"\.(\d{7,})", lambda m: f".{m.group(1)[:6]}", s)
+    return datetime.fromisoformat(s)
 
 
 def _l1_cache_key(symbol: str, adjust: str, start: date, end: date) -> str:

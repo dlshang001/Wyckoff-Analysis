@@ -173,12 +173,22 @@ from core.stock_data_fetcher import StockDataFetcher
 fetcher = StockDataFetcher(max_workers=2)
 test_symbols_full = ["000001", "000002"]
 
+# 使用缓存中实际的日期范围
+if meta_map:
+    sample_meta = list(meta_map.values())[0]
+    test_start = sample_meta.start_date
+    test_end = sample_meta.end_date
+else:
+    test_start = date(2026, 3, 1)
+    test_end = date(2026, 3, 26)
+
 print(f"    拉取 {test_symbols_full} 数据...")
+print(f"    请求范围: {test_start} ~ {test_end}")
 try:
     df_map, summary = fetcher.fetch_all(
         symbols=test_symbols_full,
-        start_date=date(2026, 3, 1),
-        end_date=date(2026, 3, 27),
+        start_date=test_start,
+        end_date=test_end,
         adjust="qfq",
     )
     print(f"    结果: {len(df_map)} 只股票")
