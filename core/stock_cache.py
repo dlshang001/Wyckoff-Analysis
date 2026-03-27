@@ -336,8 +336,8 @@ def get_cache_stats() -> dict:
     try:
         meta_resp = (
             supabase.table(TABLE_STOCK_CACHE_META)
-            .select("symbol", count="exact")
-            .limit(1)
+            .select("symbol,start_date,end_date,updated_at", count="exact")
+            .limit(1000)
             .execute()
         )
         data_resp = (
@@ -346,11 +346,44 @@ def get_cache_stats() -> dict:
             .limit(1)
             .execute()
         )
+
+        meta_count = getattr(meta_resp, "count", 0) or 0
+        data_count = getattr(data_resp, "count", 0) or 0
+
+        oldest_date = None
+        newest_date = None
+        total_trading_days = 0
+
+        if meta_resp.data:
+            for row in meta_resp.data:
+                start = row.get("start_date")
+                end = row.get("end_date")
+                if start:
+                    if oldest_date is None or start < oldest_date:
+                        oldest_date = start
+                if end:
+                    if newest_date is None or end > newest_date:
+                        newest_date = end
+                if start and end:
+                    try:
+                        start_dt = _parse_iso_datetime(start)
+                        end_dt = _parse_iso_datetime(end)
+                        days = (end_dt - start_dt).days
+                        total_trading_days += max(days, 0)
+                    except Exception:
+                        pass
+
+        estimated_size_mb = (data_count * 9 * 8) / (1024 * 1024)
+
         return {
             "enabled": STOCK_CACHE_ENABLED,
-            "meta_count": getattr(meta_resp, "count", 0) or 0,
-            "data_count": getattr(data_resp, "count", 0) or 0,
+            "meta_count": meta_count,
+            "data_count": data_count,
             "l1_cache_size": len(_L1_CACHE),
+            "oldest_date": oldest_date,
+            "newest_date": newest_date,
+            "estimated_size_mb": round(estimated_size_mb, 2),
+            "avg_trading_days": round(total_trading_days / max(meta_count, 1), 1) if meta_count > 0 else 0,
         }
     except Exception as e:
         return {"enabled": STOCK_CACHE_ENABLED, "error": str(e)}

@@ -469,4 +469,52 @@ with content_col:
                 finally:
                     loading.empty()
 
+        st.divider()
+
+        # 6. 缓存管理
+        st.subheader("💾 数据缓存管理")
+        with st.container(border=True):
+            st.markdown("股票日线数据缓存状态。缓存可加速重复查询，减少 API 调用。")
+
+            from core.stock_cache import get_cache_stats, cleanup_cache, STOCK_CACHE_ENABLED
+
+            if not STOCK_CACHE_ENABLED:
+                st.warning("缓存功能已禁用 (STOCK_CACHE_ENABLED=false)")
+            else:
+                cache_stats = get_cache_stats()
+
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.metric("缓存股票数", cache_stats.get("meta_count", 0))
+                with c2:
+                    st.metric("数据条数", cache_stats.get("data_count", 0))
+                with c3:
+                    st.metric("估算存储", f"{cache_stats.get('estimated_size_mb', 0):.1f} MB")
+                with c4:
+                    st.metric("内存缓存", cache_stats.get("l1_cache_size", 0))
+
+                c5, c6 = st.columns(2)
+                with c5:
+                    oldest = cache_stats.get("oldest_date", "N/A")
+                    if oldest and oldest != "N/A":
+                        oldest = oldest[:10]
+                    st.caption(f"最早日期: {oldest}")
+                with c6:
+                    newest = cache_stats.get("newest_date", "N/A")
+                    if newest and newest != "N/A":
+                        newest = newest[:10]
+                    st.caption(f"最新日期: {newest}")
+
+                st.caption(f"平均每只股票交易日: {cache_stats.get('avg_trading_days', 0)} 天")
+
+                c_clean, c_rebuild = st.columns(2)
+                with c_clean:
+                    if st.button("🗑️ 清理过期缓存", key="clean_cache"):
+                        from core.stock_cache import STOCK_CACHE_TTL_DAYS
+                        cleanup_cache(ttl_days=0)
+                        st.toast("✅ 过期缓存已清理", icon="🗑️")
+                        st.rerun()
+                with c_rebuild:
+                    st.caption("清理超过 30 天的缓存数据")
+
         st.info("☁️ 您的配置已启用云端同步，将在所有登录设备间自动漫游。")
