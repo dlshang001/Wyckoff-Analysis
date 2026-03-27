@@ -19,12 +19,12 @@ from utils.tushare_client import get_pro
 @dataclass
 class CustomTrend25Config:
     strategy_id: str = "custom_trend25"
-    trading_days: int = 260
+    trading_days: int = 80
     only_main_board: bool = True
     exclude_chinext: bool = True
     exclude_star: bool = True
     exclude_bse: bool = True
-    limit_count: int = 800
+    limit_count: int = 0
     max_workers: int = 8
 
     ma_short: int = 10
@@ -62,35 +62,36 @@ def _to_bool(v: Any, default: bool) -> bool:
 
 def _parse_config(payload: dict[str, Any] | None) -> CustomTrend25Config:
     p = dict(payload or {})
+    defaults = CustomTrend25Config()
     cfg = CustomTrend25Config(
-        trading_days=max(int(p.get("trading_days", 260) or 260), 1),
+        trading_days=max(int(p.get("trading_days", defaults.trading_days) or defaults.trading_days), 1),
 
-        only_main_board=_to_bool(p.get("only_main_board"), True),
-        exclude_chinext=_to_bool(p.get("exclude_chinext"), True),
-        exclude_star=_to_bool(p.get("exclude_star"), True),
-        exclude_bse=_to_bool(p.get("exclude_bse"), True),
-        limit_count=max(int(p.get("limit_count", 800) or 800), 0),
-        max_workers=min(max(int(p.get("max_workers", 8) or 8), 1), 24),
-        ma_short=max(int(p.get("ma_short", 10) or 10), 1),
-        ma_mid=max(int(p.get("ma_mid", 25) or 25), 1),
-        no_new_high_window=max(int(p.get("no_new_high_window", 20) or 20), 1),
-        min_return_window=max(int(p.get("min_return_window", 60) or 60), 1),
-        min_return_pct=float(p.get("min_return_pct", 15.0) or 15.0),
-        max_return_5d_window=max(int(p.get("max_return_5d_window", 5) or 5), 1),
-        max_return_5d_pct=float(p.get("max_return_5d_pct", 20.0) or 20.0),
+        only_main_board=_to_bool(p.get("only_main_board"), defaults.only_main_board),
+        exclude_chinext=_to_bool(p.get("exclude_chinext"), defaults.exclude_chinext),
+        exclude_star=_to_bool(p.get("exclude_star"), defaults.exclude_star),
+        exclude_bse=_to_bool(p.get("exclude_bse"), defaults.exclude_bse),
+        limit_count=max(int(p.get("limit_count", defaults.limit_count) or defaults.limit_count), 0),
+        max_workers=min(max(int(p.get("max_workers", defaults.max_workers) or defaults.max_workers), 1), 24),
+        ma_short=max(int(p.get("ma_short", defaults.ma_short) or defaults.ma_short), 1),
+        ma_mid=max(int(p.get("ma_mid", defaults.ma_mid) or defaults.ma_mid), 1),
+        no_new_high_window=max(int(p.get("no_new_high_window", defaults.no_new_high_window) or defaults.no_new_high_window), 1),
+        min_return_window=max(int(p.get("min_return_window", defaults.min_return_window) or defaults.min_return_window), 1),
+        min_return_pct=float(p.get("min_return_pct", defaults.min_return_pct) or defaults.min_return_pct),
+        max_return_5d_window=max(int(p.get("max_return_5d_window", defaults.max_return_5d_window) or defaults.max_return_5d_window), 1),
+        max_return_5d_pct=float(p.get("max_return_5d_pct", defaults.max_return_5d_pct) or defaults.max_return_5d_pct),
 
-        no_limitup_window=max(int(p.get("no_limitup_window", 3) or 3), 1),
-        limitup_threshold_pct=float(p.get("limitup_threshold_pct", 9.9) or 9.9),
-        burst_window=max(int(p.get("burst_window", 10) or 10), 2),
-        burst_threshold_pct=float(p.get("burst_threshold_pct", 6.0) or 6.0),
-        vol_peak_window=max(int(p.get("vol_peak_window", 10) or 10), 2),
-        vol_avg_window=max(int(p.get("vol_avg_window", 60) or 60), 10),
-        vol_peak_ratio=float(p.get("vol_peak_ratio", 1.5) or 1.5),
-        min_avg_amount_5d_yuan=float(p.get("min_avg_amount_5d_yuan", 5e8) or 5e8),
-        min_market_cap_yi=float(p.get("min_market_cap_yi", 10.0) or 10.0),
-        enable_water_adapt=_to_bool(p.get("enable_water_adapt"), True),
-        enable_sector_resonance=_to_bool(p.get("enable_sector_resonance"), True),
-        top_n_sectors=max(int(p.get("top_n_sectors", 5) or 5), 1),
+        no_limitup_window=max(int(p.get("no_limitup_window", defaults.no_limitup_window) or defaults.no_limitup_window), 1),
+        limitup_threshold_pct=float(p.get("limitup_threshold_pct", defaults.limitup_threshold_pct) or defaults.limitup_threshold_pct),
+        burst_window=max(int(p.get("burst_window", defaults.burst_window) or defaults.burst_window), 2),
+        burst_threshold_pct=float(p.get("burst_threshold_pct", defaults.burst_threshold_pct) or defaults.burst_threshold_pct),
+        vol_peak_window=max(int(p.get("vol_peak_window", defaults.vol_peak_window) or defaults.vol_peak_window), 2),
+        vol_avg_window=max(int(p.get("vol_avg_window", defaults.vol_avg_window) or defaults.vol_avg_window), 10),
+        vol_peak_ratio=float(p.get("vol_peak_ratio", defaults.vol_peak_ratio) or defaults.vol_peak_ratio),
+        min_avg_amount_5d_yuan=float(p.get("min_avg_amount_5d_yuan", defaults.min_avg_amount_5d_yuan) or defaults.min_avg_amount_5d_yuan),
+        min_market_cap_yi=float(p.get("min_market_cap_yi", defaults.min_market_cap_yi) or defaults.min_market_cap_yi),
+        enable_water_adapt=_to_bool(p.get("enable_water_adapt"), defaults.enable_water_adapt),
+        enable_sector_resonance=_to_bool(p.get("enable_sector_resonance"), defaults.enable_sector_resonance),
+        top_n_sectors=max(int(p.get("top_n_sectors", defaults.top_n_sectors) or defaults.top_n_sectors), 1),
     )
     if cfg.ma_short >= cfg.ma_mid:
         cfg.ma_mid = cfg.ma_short + 1

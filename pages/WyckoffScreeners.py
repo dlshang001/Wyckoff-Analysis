@@ -17,6 +17,7 @@ from app.background_jobs import (
 )
 from app.layout import setup_page
 from app.navigation import show_right_nav
+from integrations.supabase_strategy_config import get_strategy_config_with_defaults, save_strategy_config
 from utils import extract_symbols_from_text
 
 setup_page(page_title="Wyckoff Funnel", page_icon="🔬")
@@ -380,17 +381,21 @@ with content_col:
             _render_funnel_result(active_result, is_newly_completed=is_newly_completed)
 
     with tab_custom:
+        user = st.session_state.get("user") or {}
+        user_id = user.get("id") if isinstance(user, dict) else None
+        saved_cfg = get_strategy_config_with_defaults(user_id, "custom_trend25") if user_id else {}
+
         st.subheader("股票池")
         p1, p2 = st.columns(2)
         with p1:
-            c_only_main = st.checkbox("仅主板", value=True, key="ct_only_main")
-            c_ex_chinext = st.checkbox("排除创业板", value=True, key="ct_ex_chinext")
-            c_ex_star = st.checkbox("排除科创板", value=True, key="ct_ex_star")
-            c_ex_bse = st.checkbox("排除北交所", value=True, key="ct_ex_bse")
+            c_only_main = st.checkbox("仅主板", value=bool(saved_cfg.get("only_main_board", True)), key="ct_only_main")
+            c_ex_chinext = st.checkbox("排除创业板", value=bool(saved_cfg.get("exclude_chinext", True)), key="ct_ex_chinext")
+            c_ex_star = st.checkbox("排除科创板", value=bool(saved_cfg.get("exclude_star", True)), key="ct_ex_star")
+            c_ex_bse = st.checkbox("排除北交所", value=bool(saved_cfg.get("exclude_bse", True)), key="ct_ex_bse")
         with p2:
-            c_limit = st.number_input("股票池上限", min_value=1, max_value=5000, value=800, step=100, key="ct_limit")
-            c_trading_days = st.number_input("交易日窗口", min_value=1, max_value=600, value=260, step=1, key="ct_days")
-            c_max_workers = st.number_input("后台并发拉取数", min_value=1, max_value=24, value=8, step=1, key="ct_workers")
+            c_limit = st.number_input("股票池上限", min_value=0, max_value=5000, value=int(saved_cfg.get("limit_count", 0)), step=100, key="ct_limit")
+            c_trading_days = st.number_input("交易日窗口", min_value=1, max_value=600, value=int(saved_cfg.get("trading_days", 80)), step=1, key="ct_days")
+            c_max_workers = st.number_input("后台并发拉取数", min_value=1, max_value=24, value=int(saved_cfg.get("max_workers", 8)), step=1, key="ct_workers")
 
         st.divider()
         st.subheader("策略参数")
@@ -398,52 +403,87 @@ with content_col:
         st.markdown("**趋势条件**")
         g1, g2, g3 = st.columns(3)
         with g1:
-            c_ma_short = st.number_input("短均线", min_value=1, max_value=30, value=10, step=1, key="ct_ma_short")
+            c_ma_short = st.number_input("短均线", min_value=1, max_value=30, value=int(saved_cfg.get("ma_short", 10)), step=1, key="ct_ma_short")
         with g2:
-            c_ma_mid = st.number_input("中均线", min_value=1, max_value=60, value=25, step=1, key="ct_ma_mid")
+            c_ma_mid = st.number_input("中均线", min_value=1, max_value=60, value=int(saved_cfg.get("ma_mid", 25)), step=1, key="ct_ma_mid")
         with g3:
-            c_no_new_high = st.number_input("未创新高窗口(天)", min_value=1, max_value=120, value=20, step=1, key="ct_no_new_high")
+            c_no_new_high = st.number_input("未创新高窗口(天)", min_value=1, max_value=120, value=int(saved_cfg.get("no_new_high_window", 20)), step=1, key="ct_no_new_high")
 
         st.markdown("**涨幅与爆发条件**")
         r1, r2, r3 = st.columns(3)
         with r1:
-            c_min_ret_window = st.number_input("中期涨幅窗口(天)", min_value=1, max_value=180, value=60, step=1, key="ct_min_ret_window")
-            c_min_ret = st.number_input("中期最小涨幅%", min_value=0.0, max_value=80.0, value=15.0, step=1.0, key="ct_min_ret")
+            c_min_ret_window = st.number_input("中期涨幅窗口(天)", min_value=1, max_value=180, value=int(saved_cfg.get("min_return_window", 60)), step=1, key="ct_min_ret_window")
+            c_min_ret = st.number_input("中期最小涨幅%", min_value=0.0, max_value=80.0, value=float(saved_cfg.get("min_return_pct", 15.0)), step=1.0, key="ct_min_ret")
         with r2:
-            c_max_ret5_window = st.number_input("短期涨幅窗口(天)", min_value=1, max_value=30, value=5, step=1, key="ct_max_ret5_window")
-            c_max_ret5 = st.number_input("短期最大涨幅%", min_value=0.0, max_value=40.0, value=20.0, step=1.0, key="ct_max_ret5")
+            c_max_ret5_window = st.number_input("短期涨幅窗口(天)", min_value=1, max_value=30, value=int(saved_cfg.get("max_return_5d_window", 5)), step=1, key="ct_max_ret5_window")
+            c_max_ret5 = st.number_input("短期最大涨幅%", min_value=0.0, max_value=40.0, value=float(saved_cfg.get("max_return_5d_pct", 20.0)), step=1.0, key="ct_max_ret5")
         with r3:
-            c_burst_window = st.number_input("爆发观察窗口(天)", min_value=1, max_value=30, value=10, step=1, key="ct_burst_window")
-            c_burst_th = st.number_input("爆发阈值%", min_value=0.0, max_value=15.0, value=6.0, step=0.5, key="ct_burst_th")
+            c_burst_window = st.number_input("爆发观察窗口(天)", min_value=1, max_value=30, value=int(saved_cfg.get("burst_window", 10)), step=1, key="ct_burst_window")
+            c_burst_th = st.number_input("爆发阈值%", min_value=0.0, max_value=15.0, value=float(saved_cfg.get("burst_threshold_pct", 6.0)), step=0.5, key="ct_burst_th")
 
         st.markdown("**风险约束条件**")
         k1, k2 = st.columns(2)
         with k1:
-            c_no_limitup_window = st.number_input("禁涨停窗口(天)", min_value=1, max_value=20, value=3, step=1, key="ct_no_limitup_window")
+            c_no_limitup_window = st.number_input("禁涨停窗口(天)", min_value=1, max_value=20, value=int(saved_cfg.get("no_limitup_window", 3)), step=1, key="ct_no_limitup_window")
         with k2:
-            c_limitup_pct = st.number_input("涨停判定阈值%", min_value=0.0, max_value=20.0, value=9.9, step=0.1, key="ct_limitup_pct")
+            c_limitup_pct = st.number_input("涨停判定阈值%", min_value=0.0, max_value=20.0, value=float(saved_cfg.get("limitup_threshold_pct", 9.9)), step=0.1, key="ct_limitup_pct")
 
         st.markdown("**量能与资金条件**")
         a1, a2, a3 = st.columns(3)
         with a1:
-            c_vol_peak_window = st.number_input("量峰窗口(天)", min_value=1, max_value=30, value=10, step=1, key="ct_vol_peak_window")
-            c_vol_ratio = st.number_input("量峰比阈值", min_value=0.1, max_value=5.0, value=1.5, step=0.1, key="ct_vol_ratio")
+            c_vol_peak_window = st.number_input("量峰窗口(天)", min_value=1, max_value=30, value=int(saved_cfg.get("vol_peak_window", 10)), step=1, key="ct_vol_peak_window")
+            c_vol_ratio = st.number_input("量峰比阈值", min_value=0.1, max_value=5.0, value=float(saved_cfg.get("vol_peak_ratio", 1.5)), step=0.1, key="ct_vol_ratio")
         with a2:
-            c_vol_avg_window = st.number_input("量均窗口(天)", min_value=1, max_value=180, value=60, step=1, key="ct_vol_avg_window")
-            c_min_amt = st.number_input("5日均成交额下限(亿)", min_value=0.0, max_value=50.0, value=5.0, step=0.5, key="ct_min_amt")
+            c_vol_avg_window = st.number_input("量均窗口(天)", min_value=1, max_value=180, value=int(saved_cfg.get("vol_avg_window", 60)), step=1, key="ct_vol_avg_window")
+            c_min_amt = st.number_input("5日均成交额下限(亿)", min_value=0.0, max_value=50.0, value=float(saved_cfg.get("min_avg_amount_5d_yuan", 5e8)) / 1e8, step=0.5, key="ct_min_amt")
         with a3:
-            c_min_mv = st.number_input("流通市值下限(亿)", min_value=0.0, max_value=1000.0, value=10.0, step=1.0, key="ct_min_mv")
+            c_min_mv = st.number_input("流通市值下限(亿)", min_value=0.0, max_value=1000.0, value=float(saved_cfg.get("min_market_cap_yi", 10.0)), step=1.0, key="ct_min_mv")
 
         st.markdown("**增强项**")
         e1, e2 = st.columns(2)
         with e1:
-            c_water = st.checkbox("启用水温自适应", value=True, key="ct_water")
+            c_water = st.checkbox("启用水温自适应", value=bool(saved_cfg.get("enable_water_adapt", True)), key="ct_water")
         with e2:
-            c_sector = st.checkbox("启用行业共振", value=True, key="ct_sector")
-            c_topn = st.number_input("行业TopN", min_value=1, max_value=10, value=5, step=1, key="ct_topn")
+            c_sector = st.checkbox("启用行业共振", value=bool(saved_cfg.get("enable_sector_resonance", True)), key="ct_sector")
+            c_topn = st.number_input("行业TopN", min_value=1, max_value=10, value=int(saved_cfg.get("top_n_sectors", 5)), step=1, key="ct_topn")
 
         c_run = st.button("提交中期趋势策略后台筛选", type="primary")
+        c_save = st.button("保存当前配置", type="secondary")
         c_refresh = st.button("刷新中期趋势策略状态")
+
+        if c_save and user_id:
+            config_to_save = {
+                "trading_days": int(c_trading_days),
+                "only_main_board": bool(c_only_main),
+                "exclude_chinext": bool(c_ex_chinext),
+                "exclude_star": bool(c_ex_star),
+                "exclude_bse": bool(c_ex_bse),
+                "limit_count": int(c_limit),
+                "max_workers": int(c_max_workers),
+                "ma_short": int(c_ma_short),
+                "ma_mid": int(c_ma_mid),
+                "no_new_high_window": int(c_no_new_high),
+                "min_return_window": int(c_min_ret_window),
+                "min_return_pct": float(c_min_ret),
+                "max_return_5d_window": int(c_max_ret5_window),
+                "max_return_5d_pct": float(c_max_ret5),
+                "no_limitup_window": int(c_no_limitup_window),
+                "limitup_threshold_pct": float(c_limitup_pct),
+                "burst_window": int(c_burst_window),
+                "burst_threshold_pct": float(c_burst_th),
+                "vol_peak_window": int(c_vol_peak_window),
+                "vol_avg_window": int(c_vol_avg_window),
+                "vol_peak_ratio": float(c_vol_ratio),
+                "min_avg_amount_5d_yuan": float(c_min_amt) * 1e8,
+                "min_market_cap_yi": float(c_min_mv),
+                "enable_water_adapt": bool(c_water),
+                "enable_sector_resonance": bool(c_sector),
+                "top_n_sectors": int(c_topn),
+            }
+            if save_strategy_config(user_id, "custom_trend25", config_to_save):
+                st.toast("✅ 配置已保存", icon="💾")
+            else:
+                st.toast("❌ 保存失败", icon="⚠️")
 
         if c_run:
             ready, msg = background_jobs_ready_for_current_user()
