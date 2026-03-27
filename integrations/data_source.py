@@ -1087,6 +1087,8 @@ def fetch_all_stocks_by_trade_date(
     start_s = start_date.strftime("%Y%m%d") if isinstance(start_date, date) else str(start_date).replace("-", "")
     end_s = end_date.strftime("%Y%m%d") if isinstance(end_date, date) else str(end_date).replace("-", "")
     
+    print(f"[fetch_all_stocks_by_trade_date] 日期范围: {start_s} ~ {end_s}")
+    
     trade_dates = get_trade_dates(start_s, end_s)
     if not trade_dates:
         print(f"[fetch_all_stocks_by_trade_date] 未找到交易日: {start_s} ~ {end_s}")

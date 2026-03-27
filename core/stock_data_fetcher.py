@@ -271,14 +271,19 @@ class StockDataFetcher:
 
         if self.use_cache and STOCK_CACHE_ENABLED:
             meta_map = batch_get_cache_meta(symbols, adjust_key)
+            print(f"[stock_data_fetcher] 查询到 {len(meta_map)} 只股票的缓存元数据")
             for sym in symbols:
                 meta = meta_map.get(sym)
                 if meta is not None and meta.end_date >= end_date and meta.start_date <= start_date:
                     cached_symbols.append(sym)
                 else:
                     uncached_symbols.append(sym)
+                    if meta is not None:
+                        print(f"[stock_data_fetcher] {sym} 缓存不满足: meta.start_date={meta.start_date}, meta.end_date={meta.end_date}, request.start={start_date}, request.end={end_date}")
+            print(f"[stock_data_fetcher] 缓存命中: {len(cached_symbols)} 只，需要拉取: {len(uncached_symbols)} 只")
         else:
             uncached_symbols = list(symbols)
+            print(f"[stock_data_fetcher] 缓存未启用，需要拉取: {len(uncached_symbols)} 只")
 
         for sym in cached_symbols:
             meta = meta_map.get(sym)
@@ -295,11 +300,13 @@ class StockDataFetcher:
                 uncached_symbols.append(sym)
 
         if uncached_symbols:
-            if use_batch_mode and len(uncached_symbols) >= 100:
+            if use_batch_mode:
                 print(f"[stock_data_fetcher] 使用批量模式获取 {len(uncached_symbols)} 只股票数据...")
+                print(f"[stock_data_fetcher] 日期范围: {start_date} ~ {end_date}")
                 batch_df_map = self._fetch_batch_by_trade_date(
                     uncached_symbols, start_date, end_date, adjust
                 )
+                print(f"[stock_data_fetcher] 批量模式返回 {len(batch_df_map)} 只股票")
                 
                 for sym in uncached_symbols:
                     if sym in batch_df_map and batch_df_map[sym] is not None and not batch_df_map[sym].empty:

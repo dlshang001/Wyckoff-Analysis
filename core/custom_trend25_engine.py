@@ -363,6 +363,7 @@ def run_custom_trend25(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         start_date=window.start_trade_date,
         end_date=window.end_trade_date,
         adjust="qfq",
+        use_batch_mode=True,
     )
 
     for sym in list(df_map.keys()):
