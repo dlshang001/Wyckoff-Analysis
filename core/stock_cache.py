@@ -149,29 +149,30 @@ def batch_get_cache_meta(symbols: list[str], adjust: str) -> dict[str, CacheMeta
         return {}
     result: dict[str, CacheMeta] = {}
     try:
-        resp = (
-            supabase.table(TABLE_STOCK_CACHE_META)
-            .select("symbol,adjust,source,start_date,end_date,updated_at")
-            .in_("symbol", symbols[:500])
-            .eq("adjust", adjust)
-            .execute()
-        )
-        if not resp.data:
-            return {}
-        seen = set()
-        for row in resp.data:
-            sym = row["symbol"]
-            if sym in seen:
-                continue
-            seen.add(sym)
-            result[sym] = CacheMeta(
-                symbol=sym,
-                adjust=row["adjust"],
-                source=row["source"],
-                start_date=_parse_iso_datetime(row["start_date"]).date(),
-                end_date=_parse_iso_datetime(row["end_date"]).date(),
-                updated_at=_parse_iso_datetime(row["updated_at"]),
+        batch_size = 500
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            resp = (
+                supabase.table(TABLE_STOCK_CACHE_META)
+                .select("symbol,adjust,source,start_date,end_date,updated_at")
+                .in_("symbol", batch)
+                .eq("adjust", adjust)
+                .execute()
             )
+            if not resp.data:
+                continue
+            for row in resp.data:
+                sym = row["symbol"]
+                if sym in result:
+                    continue
+                result[sym] = CacheMeta(
+                    symbol=sym,
+                    adjust=row["adjust"],
+                    source=row["source"],
+                    start_date=_parse_iso_datetime(row["start_date"]).date(),
+                    end_date=_parse_iso_datetime(row["end_date"]).date(),
+                    updated_at=_parse_iso_datetime(row["updated_at"]),
+                )
     except Exception:
         pass
     return result
