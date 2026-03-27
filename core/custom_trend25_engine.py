@@ -188,12 +188,12 @@ def _return_pct(close: pd.Series, lookback: int) -> float | None:
     return (end - start) / start * 100.0
 
 
-def _compute_benchmark_regime_fallback() -> dict[str, Any]:
+def _compute_benchmark_regime_fallback(trading_days: int = 250) -> dict[str, Any]:
     from integrations.data_source import fetch_stock_hist
 
     result = {"benchmark_regime": "UNKNOWN", "premarket_regime": "UNKNOWN"}
     try:
-        window = _resolve_trading_window(end_calendar_day=resolve_end_calendar_day(), trading_days=250)
+        window = _resolve_trading_window(end_calendar_day=resolve_end_calendar_day(), trading_days=trading_days)
         bench_df = fetch_stock_hist(symbol="000001", start=window.start_trade_date, end=window.end_trade_date, adjust="qfq")
         if bench_df is None or bench_df.empty:
             return result
@@ -239,7 +239,7 @@ def _adapt_by_regime(cfg: CustomTrend25Config, regime: dict[str, Any] | None) ->
     bench = str(row.get("benchmark_regime", "") or "UNKNOWN").upper()
     pre = str(row.get("premarket_regime", "") or "UNKNOWN").upper()
     if bench == "UNKNOWN":
-        fallback = _compute_benchmark_regime_fallback()
+        fallback = _compute_benchmark_regime_fallback(trading_days=max(cfg.trading_days, 200))
         bench = str(fallback.get("benchmark_regime", "UNKNOWN") or "UNKNOWN").upper()
         context["benchmark_regime"] = bench
         context["premarket_regime"] = str(fallback.get("premarket_regime", "UNKNOWN") or "UNKNOWN").upper()
