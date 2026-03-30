@@ -1,33 +1,53 @@
-.DS_Store
-.idea/
-.vscode/
+# Logs
+logs/
+*.log
 
-.venv/
-venv/
-ENV/
-env/
-
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
 
-pip-wheel-metadata/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-data/*.csv
-# data/stock_list_cache.json
-data/trade_dates_cache.json
-data/sector_map_cache.json
-data/market_cap_cache.json
-data/funnel_snapshots/*
-!data/funnel_snapshots/.gitkeep
-logs/
-*.csv
-*.xlsx
-*.xls
+# Environment variables
 .env
+.env.local
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
