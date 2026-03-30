@@ -308,6 +308,45 @@ def cleanup_cache(ttl_days: int | None = None) -> None:
         pass
 
 
+def _refresh_cache_meta_range(symbol: str, adjust: str) -> None:
+    """同步缓存表的最早/最晚日期到 meta，避免裁剪后 meta 仍指向过早日期导致反复重拉。"""
+    supabase = get_supabase_client()
+    if supabase is None:
+        return
+    try:
+        first_resp = (
+            supabase.table(TABLE_STOCK_CACHE_DATA)
+            .select("date")
+            .eq("symbol", symbol)
+            .eq("adjust", adjust)
+            .order("date", asc=True)
+            .limit(1)
+            .execute()
+        )
+        last_resp = (
+            supabase.table(TABLE_STOCK_CACHE_DATA)
+            .select("date")
+            .eq("symbol", symbol)
+            .eq("adjust", adjust)
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not first_resp.data or not last_resp.data:
+            print(f"[_refresh_cache_meta_range] no data for {symbol}/{adjust}, skip")
+            return
+        start_date = _parse_iso_datetime(first_resp.data[0]["date"]).date()
+        end_date = _parse_iso_datetime(last_resp.data[0]["date"]).date()
+        meta = get_cache_meta(symbol, adjust)
+        source = meta.source if meta is not None else "tushare"
+        upsert_cache_meta(symbol, adjust, source, start_date, end_date)
+        print(
+            f"[_refresh_cache_meta_range] {symbol}/{adjust}: meta synced to start={start_date}, end={end_date}, source={source}"
+        )
+    except Exception as e:
+        print(f"[_refresh_cache_meta_range] failed: {e}")
+
+
 def trim_cache_to_max_days(symbol: str, adjust: str, max_days: int | None = None) -> None:
     """将缓存数据裁剪到最大天数"""
     max_days = max_days or STOCK_CACHE_MAX_TRADING_DAYS
@@ -331,6 +370,7 @@ def trim_cache_to_max_days(symbol: str, adjust: str, max_days: int | None = None
         latest_date = _parse_iso_datetime(resp.data[0]["date"]).date()
         cutoff_date = latest_date - timedelta(days=max_days * 2)
         delete_old_cache_data(symbol, adjust, cutoff_date)
+        _refresh_cache_meta_range(symbol, adjust)
     except Exception:
         pass
 

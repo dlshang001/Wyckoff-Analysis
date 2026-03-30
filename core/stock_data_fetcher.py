@@ -160,11 +160,17 @@ class StockDataFetcher:
         incremental = False
 
         if cache_meta is not None:
+            print(
+                f"[fetch_one] meta hit: symbol={symbol}, adjust={adjust_key}, meta.start={cache_meta.start_date}, meta.end={cache_meta.end_date}, req.start={start_date}, req.end={end_date}"
+            )
             if cache_meta.end_date >= end_date and cache_meta.start_date <= start_date:
                 cached_df = load_cached_history(
                     symbol, adjust_key, cache_meta.source, start_date, end_date
                 )
                 if cached_df is not None and not cached_df.empty:
+                    print(
+                        f"[fetch_one] full cache hit: {symbol}, source={cache_meta.source}, rows={len(cached_df)}"
+                    )
                     result_df = denormalize_hist_df(cached_df)
                     self._l1_set(symbol, adjust_key, start_date, end_date, result_df)
                     return FetchResult(
@@ -175,8 +181,12 @@ class StockDataFetcher:
                         from_cache=True,
                         incremental=False,
                     )
+
             elif cache_meta.end_date >= start_date and cache_meta.end_date < end_date:
                 fetch_start = cache_meta.end_date + timedelta(days=1)
+                print(
+                    f"[fetch_one] tail-miss incremental: {symbol}, fetch_start={fetch_start}, cached_end={cache_meta.end_date}"
+                )
                 cached_df = load_cached_history(
                     symbol, adjust_key, cache_meta.source, start_date, cache_meta.end_date
                 )
@@ -184,11 +194,15 @@ class StockDataFetcher:
                 incremental = True
             elif cache_meta.start_date > start_date and cache_meta.start_date <= end_date:
                 fetch_end = cache_meta.start_date - timedelta(days=1)
+                print(
+                    f"[fetch_one] head-miss incremental: {symbol}, fetch_end={fetch_end}, cached_start={cache_meta.start_date}"
+                )
                 cached_df = load_cached_history(
                     symbol, adjust_key, cache_meta.source, cache_meta.start_date, end_date
                 )
                 actual_source = cache_meta.source
                 incremental = True
+
 
         df = None
         source = ""
@@ -197,8 +211,12 @@ class StockDataFetcher:
         try:
             df = fetch_stock_hist(symbol, fetch_start, fetch_end, adjust, use_cache=False)
             source = "api"
+            print(
+                f"[fetch_one] api fetch: {symbol}, window={fetch_start}~{fetch_end}, rows={0 if df is None else len(df)}, incremental={incremental}"
+            )
         except Exception as e:
             error = str(e)
+
 
         if df is not None and cached_df is not None and not cached_df.empty:
             new_normalized = normalize_hist_df(df)
