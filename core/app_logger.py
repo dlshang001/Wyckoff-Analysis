@@ -77,9 +77,9 @@ def _get_supabase_client_direct():
     if not url or not key:
         try:
             from dotenv import load_dotenv
-            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
             if os.path.exists(env_path):
-                load_dotenv(env_path)
+                load_dotenv(dotenv_path=env_path, encoding="utf-8")
                 url = os.getenv("SUPABASE_URL")
                 key = os.getenv("SUPABASE_KEY")
         except ImportError:
