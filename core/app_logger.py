@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Mapping
 
 from core.constants import TABLE_APP_LOGS
-from integrations.supabase_client import get_supabase_client
 
 
 def _to_bool(v: Any, default: bool = True) -> bool:
@@ -22,6 +22,45 @@ def _to_bool(v: Any, default: bool = True) -> bool:
     if v is None:
         return default
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_supabase_client_direct():
+    """直接创建 Supabase 客户端（不依赖 Streamlit session_state）"""
+    from supabase import create_client
+    
+    # 尝试从环境变量加载
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    
+    # 如果环境变量没有，尝试从 .env 文件加载
+    if not url or not key:
+        try:
+            from dotenv import load_dotenv
+            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+            if os.path.exists(env_path):
+                load_dotenv(env_path)
+                url = os.getenv("SUPABASE_URL")
+                key = os.getenv("SUPABASE_KEY")
+        except ImportError:
+            pass
+        except Exception as e:
+            pass
+    
+    if not url or not key:
+        try:
+            import streamlit as st
+            url = st.secrets.get("SUPABASE_URL")
+            key = st.secrets.get("SUPABASE_KEY")
+        except (FileNotFoundError, KeyError, ImportError):
+            pass
+    
+    if not url or not key:
+        return None
+    
+    try:
+        return create_client(url, key)
+    except Exception as e:
+        return None
 
 
 def _current_user_id() -> str | None:
@@ -37,17 +76,25 @@ def _current_user_id() -> str | None:
 
 
 def log_event(level: str, message: str, context: Mapping[str, Any] | None = None) -> None:
+    # 检查是否启用日志
     if not _to_bool(os.getenv("SUPABASE_LOG_ENABLED", "1"), True):
         return
+    
     try:
-        supabase = get_supabase_client()
+        supabase = _get_supabase_client_direct()
+        if supabase is None:
+            return
+        
         payload = {
             "level": str(level).lower(),
             "message": message,
             "context": json.dumps(context or {}, ensure_ascii=False) if context else None,
             "user_id": _current_user_id(),
         }
-        supabase.table(TABLE_APP_LOGS).insert(payload).execute()
-    except Exception:
-        # 避免日志失败影响业务
+        
+        # 执行插入
+        result = supabase.table(TABLE_APP_LOGS).insert(payload).execute()
+        
+    except Exception as e:
+        # 静默失败，不影响主流程
         return
