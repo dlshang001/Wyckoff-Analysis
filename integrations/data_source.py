@@ -24,6 +24,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 from http.client import RemoteDisconnected
+from core.app_logger import log_event
 
 import pandas as pd
 
@@ -742,17 +743,33 @@ def fetch_stock_hist(
     fetch_start_s = fetch_start_date.strftime("%Y%m%d")
     fetch_end_s = fetch_end_date.strftime("%Y%m%d")
 
+    log_event("info", "fetch_stock_hist api fetch start", {
+        "symbol": symbol,
+        "fetch_start": fetch_start_s,
+        "fetch_end": fetch_end_s,
+        "incremental": incremental if 'incremental' in locals() else False
+    })
+
     if pro is not None:
         try:
             df = _fetch_stock_tushare(symbol, fetch_start_s, fetch_end_s, "qfq")
             source = "tushare"
+            log_event("info", "fetch_stock_hist tushare success", {
+                "symbol": symbol,
+                "rows": len(df) if df is not None else 0
+            })
         except Exception as e:
             _debug_source_fail("tushare", e)
             failed_sources.append("tushare")
             failed_details.append(f"tushare={_compact_error(e)}")
+            log_event("warning", "fetch_stock_hist tushare failed", {
+                "symbol": symbol,
+                "error": _compact_error(e)
+            })
     else:
         failed_sources.append("tushare(unconfigured)")
         failed_details.append("tushare=token_missing")
+        log_event("warning", "fetch_stock_hist tushare not configured", {"symbol": symbol})
 
     disable_akshare = os.getenv("DATA_SOURCE_DISABLE_AKSHARE", "").strip().lower() in {
         "1",
@@ -1089,12 +1106,25 @@ def fetch_all_stocks_by_trade_date(
     
     print(f"[fetch_all_stocks_by_trade_date] 日期范围: {start_s} ~ {end_s}")
     
+    log_event("info", "fetch_all_stocks_by_trade_date start", {
+        "start_date": start_s,
+        "end_date": end_s,
+        "adjust": adjust
+    })
+    
     trade_dates = get_trade_dates(start_s, end_s)
     if not trade_dates:
         print(f"[fetch_all_stocks_by_trade_date] 未找到交易日: {start_s} ~ {end_s}")
+        log_event("warning", "fetch_all_stocks_by_trade_date no trade dates", {
+            "start_date": start_s,
+            "end_date": end_s
+        })
         return {}
     
     print(f"[fetch_all_stocks_by_trade_date] 获取 {len(trade_dates)} 个交易日数据...")
+    log_event("info", "fetch_all_stocks_by_trade_date trade dates", {
+        "trade_dates_count": len(trade_dates)
+    })
     
     all_data: dict[str, list[dict]] = {}
     
@@ -1133,11 +1163,21 @@ def fetch_all_stocks_by_trade_date(
             
         except Exception as e:
             _debug_source_fail(f"pro.daily({trade_date})", e)
+            log_event("warning", "fetch_all_stocks_by_trade_date daily failed", {
+                "trade_date": trade_date,
+                "error": _compact_error(e)
+            })
             continue
     
     if adjust == "qfq":
         print(f"[fetch_all_stocks_by_trade_date] 获取前复权因子...")
+        log_event("info", "fetch_all_stocks_by_trade_date adj factors start", {
+            "symbols_count": len(all_data)
+        })
         adj_factor_map = _fetch_adj_factors_batch(list(all_data.keys()), start_s, end_s)
+        log_event("info", "fetch_all_stocks_by_trade_date adj factors done", {
+            "factors_count": len(adj_factor_map)
+        })
     else:
         adj_factor_map = {}
     
@@ -1155,6 +1195,9 @@ def fetch_all_stocks_by_trade_date(
         result[sym] = df
     
     print(f"[fetch_all_stocks_by_trade_date] 完成，获取 {len(result)} 只股票")
+    log_event("info", "fetch_all_stocks_by_trade_date done", {
+        "total_stocks": len(result)
+    })
     return result
 
 

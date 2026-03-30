@@ -31,7 +31,9 @@ from core.stock_cache import (
     upsert_cache_data,
     upsert_cache_meta,
 )
+from core.app_logger import log_event
 from integrations.data_source import fetch_stock_hist
+
 
 
 @dataclass
@@ -82,6 +84,11 @@ class StockDataFetcher:
         self.max_trading_days = max_trading_days or STOCK_CACHE_MAX_TRADING_DAYS
         self.progress_callback = progress_callback
         self._l1_cache: dict[str, pd.DataFrame] = {}
+        log_event("info", "StockDataFetcher initialized", {
+            "max_workers": max_workers,
+            "use_cache": use_cache,
+            "max_trading_days": self.max_trading_days
+        })
 
     def _l1_key(self, symbol: str, adjust: str, start: date, end: date) -> str:
         return f"{symbol}|{adjust}|{start.isoformat()}|{end.isoformat()}"
@@ -119,6 +126,11 @@ class StockDataFetcher:
 
         l1_df = self._l1_get(symbol, adjust_key, start_date, end_date)
         if l1_df is not None:
+            log_event("info", "fetch_one L1 cache hit", {
+                "symbol": symbol,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat()
+            })
             return FetchResult(
                 symbol=symbol,
                 df=l1_df,
@@ -130,8 +142,17 @@ class StockDataFetcher:
 
         if not self.use_cache:
             try:
+                log_event("info", "fetch_one start", {
+                    "symbol": symbol,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat()
+                })
                 df = fetch_stock_hist(symbol, start_date, end_date, adjust, use_cache=False)
                 self._l1_set(symbol, adjust_key, start_date, end_date, df)
+                log_event("info", "fetch_one success", {
+                    "symbol": symbol,
+                    "rows": len(df) if df is not None else 0
+                })
                 return FetchResult(
                     symbol=symbol,
                     df=df,
@@ -141,6 +162,10 @@ class StockDataFetcher:
                     incremental=False,
                 )
             except Exception as e:
+                log_event("error", "fetch_one failed", {
+                    "symbol": symbol,
+                    "error": str(e)
+                })
                 return FetchResult(
                     symbol=symbol,
                     df=None,
@@ -163,6 +188,12 @@ class StockDataFetcher:
             print(
                 f"[fetch_one] meta hit: symbol={symbol}, adjust={adjust_key}, meta.start={cache_meta.start_date}, meta.end={cache_meta.end_date}, req.start={start_date}, req.end={end_date}"
             )
+            log_event("info", "fetch_one cache meta hit", {
+                "symbol": symbol,
+                "cache_start": cache_meta.start_date.isoformat(),
+                "cache_end": cache_meta.end_date.isoformat()
+            })
+            
             if cache_meta.end_date >= end_date and cache_meta.start_date <= start_date:
                 cached_df = load_cached_history(
                     symbol, adjust_key, cache_meta.source, start_date, end_date
@@ -171,6 +202,11 @@ class StockDataFetcher:
                     print(
                         f"[fetch_one] full cache hit: {symbol}, source={cache_meta.source}, rows={len(cached_df)}"
                     )
+                    log_event("info", "fetch_one full cache hit", {
+                        "symbol": symbol,
+                        "source": cache_meta.source,
+                        "rows": len(cached_df)
+                    })
                     result_df = denormalize_hist_df(cached_df)
                     self._l1_set(symbol, adjust_key, start_date, end_date, result_df)
                     return FetchResult(
@@ -187,6 +223,11 @@ class StockDataFetcher:
                 print(
                     f"[fetch_one] tail-miss incremental: {symbol}, fetch_start={fetch_start}, cached_end={cache_meta.end_date}"
                 )
+                log_event("info", "fetch_one incremental fetch tail", {
+                    "symbol": symbol,
+                    "fetch_start": fetch_start.isoformat(),
+                    "cached_end": cache_meta.end_date.isoformat()
+                })
                 cached_df = load_cached_history(
                     symbol, adjust_key, cache_meta.source, start_date, cache_meta.end_date
                 )
@@ -197,6 +238,11 @@ class StockDataFetcher:
                 print(
                     f"[fetch_one] head-miss incremental: {symbol}, fetch_end={fetch_end}, cached_start={cache_meta.start_date}"
                 )
+                log_event("info", "fetch_one incremental fetch head", {
+                    "symbol": symbol,
+                    "fetch_end": fetch_end.isoformat(),
+                    "cached_start": cache_meta.start_date.isoformat()
+                })
                 cached_df = load_cached_history(
                     symbol, adjust_key, cache_meta.source, cache_meta.start_date, end_date
                 )
@@ -209,13 +255,35 @@ class StockDataFetcher:
         error = None
 
         try:
+            log_event("info", "fetch_one api fetch start", {
+                "symbol": symbol,
+                "start_date": fetch_start.isoformat(),
+                "end_date": fetch_end.isoformat(),
+                "incremental": incremental
+            })
             df = fetch_stock_hist(symbol, fetch_start, fetch_end, adjust, use_cache=False)
             source = "api"
             print(
                 f"[fetch_one] api fetch: {symbol}, window={fetch_start}~{fetch_end}, rows={0 if df is None else len(df)}, incremental={incremental}"
             )
+            log_event("info", "fetch_one api fetch success", {
+                "symbol": symbol,
+                "rows": len(df) if df is not None else 0
+            })
         except Exception as e:
             error = str(e)
+            log_event(
+                "error",
+                "fetch_one api fetch failed",
+                {
+                    "symbol": symbol,
+                    "start": fetch_start.isoformat(),
+                    "end": fetch_end.isoformat(),
+                    "adjust": adjust,
+                    "error": error,
+                    "incremental": incremental,
+                },
+            )
 
 
         if df is not None and cached_df is not None and not cached_df.empty:
@@ -225,6 +293,12 @@ class StockDataFetcher:
             combined = combined.sort_values("date").reset_index(drop=True)
             df = denormalize_hist_df(combined)
             source = actual_source or source
+            log_event("info", "fetch_one combined data", {
+                "symbol": symbol,
+                "cached_rows": len(cached_df),
+                "new_rows": len(new_normalized),
+                "combined_rows": len(df)
+            })
 
         if df is not None and not df.empty:
             self._l1_set(symbol, adjust_key, start_date, end_date, df)
@@ -232,6 +306,9 @@ class StockDataFetcher:
             if self.use_cache:
                 upsert_cache_data(symbol, adjust_key, source, df)
                 upsert_cache_meta(symbol, adjust_key, source, start_date, end_date)
+                log_event("info", "fetch_one cache updated", {
+                    "symbol": symbol
+                })
 
                 if self.max_trading_days > 0:
                     trim_cache_to_max_days(symbol, adjust_key, self.max_trading_days)
@@ -284,6 +361,14 @@ class StockDataFetcher:
         failed_count = 0
         adjust_key = adjust or "none"
 
+        log_event("info", "fetch_all start", {
+            "total_symbols": len(symbols),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "adjust": adjust,
+            "use_batch_mode": use_batch_mode
+        })
+
         cached_symbols: list[str] = []
         uncached_symbols: list[str] = []
 
@@ -299,9 +384,16 @@ class StockDataFetcher:
                     if meta is not None:
                         print(f"[stock_data_fetcher] {sym} 缓存不满足: meta.start_date={meta.start_date}, meta.end_date={meta.end_date}, request.start={start_date}, request.end={end_date}")
             print(f"[stock_data_fetcher] 缓存命中: {len(cached_symbols)} 只，需要拉取: {len(uncached_symbols)} 只")
+            log_event("info", "fetch_all cache analysis", {
+                "cached_symbols": len(cached_symbols),
+                "uncached_symbols": len(uncached_symbols)
+            })
         else:
             uncached_symbols = list(symbols)
             print(f"[stock_data_fetcher] 缓存未启用，需要拉取: {len(uncached_symbols)} 只")
+            log_event("info", "fetch_all cache disabled", {
+                "uncached_symbols": len(uncached_symbols)
+            })
 
         for sym in cached_symbols:
             meta = meta_map.get(sym)
@@ -317,10 +409,20 @@ class StockDataFetcher:
             else:
                 uncached_symbols.append(sym)
 
+        log_event("info", "fetch_all cache loaded", {
+            "successfully_loaded": cached_count
+        })
+
         if uncached_symbols:
             if use_batch_mode:
                 print(f"[stock_data_fetcher] 使用批量模式获取 {len(uncached_symbols)} 只股票数据...")
                 print(f"[stock_data_fetcher] 日期范围: {start_date} ~ {end_date}")
+                log_event("info", "fetch_all batch mode start", {
+                    "symbols_to_fetch": len(uncached_symbols),
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat()
+                })
+                
                 batch_df_map = self._fetch_batch_by_trade_date(
                     uncached_symbols, start_date, end_date, adjust
                 )
@@ -332,9 +434,17 @@ class StockDataFetcher:
                         fetched_count += 1
                     else:
                         failed_count += 1
+                
+                log_event("info", "fetch_all batch mode done", {
+                    "successfully_fetched": fetched_count,
+                    "failed": failed_count
+                })
             else:
                 total = len(uncached_symbols)
                 completed = 0
+                log_event("info", "fetch_all individual mode start", {
+                    "symbols_to_fetch": total
+                })
 
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {
@@ -361,6 +471,11 @@ class StockDataFetcher:
 
                         if self.progress_callback:
                             self.progress_callback(completed, total, sym)
+                
+                log_event("info", "fetch_all individual mode done", {
+                    "successfully_fetched": fetched_count,
+                    "failed": failed_count
+                })
 
         elapsed = time.monotonic() - start_time
         total = len(symbols)
@@ -375,7 +490,17 @@ class StockDataFetcher:
             cache_hit_rate=cache_hit_rate,
         )
 
+        log_event("info", "fetch_all completed", {
+            "total_symbols": total,
+            "cached": cached_count,
+            "fetched": fetched_count,
+            "failed": failed_count,
+            "elapsed_seconds": round(elapsed, 3),
+            "cache_hit_rate": round(cache_hit_rate, 4)
+        })
+
         return df_map, summary
+
 
     def _fetch_batch_by_trade_date(
         self,

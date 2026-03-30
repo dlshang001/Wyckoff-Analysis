@@ -14,6 +14,7 @@ from integrations.fetch_a_share_csv import get_all_stocks, _resolve_trading_wind
 from integrations.supabase_market_signal import load_latest_market_signal_daily
 from utils.trading_clock import resolve_end_calendar_day
 from utils.tushare_client import get_pro
+from core.app_logger import log_event
 
 
 @dataclass
@@ -349,13 +350,27 @@ def _eval_symbol(
 
 def run_custom_trend25(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = _parse_config(payload)
+    log_event("info", "custom_trend25 start", {"config": asdict(cfg)})
+    
     symbols, name_map = _build_universe(cfg)
+    log_event("info", "custom_trend25 universe built", {"total_symbols": len(symbols)})
+    
     window = _resolve_trading_window(end_calendar_day=resolve_end_calendar_day(), trading_days=cfg.trading_days)
+    log_event("info", "custom_trend25 trading window", {
+        "start": window.start_trade_date.isoformat(),
+        "end": window.end_trade_date.isoformat(),
+        "trading_days": cfg.trading_days
+    })
 
     market_cap_map = _fetch_circ_mv_map()
     sector_map = fetch_sector_map()
     regime_row = load_latest_market_signal_daily()
     tuned, regime_context = _adapt_by_regime(cfg, regime_row)
+    
+    log_event("info", "custom_trend25 regime", {
+        "regime_context": regime_context,
+        "tuned_params": tuned
+    })
 
     fetcher = StockDataFetcher(max_workers=cfg.max_workers)
     df_map, fetch_summary = fetcher.fetch_all(
@@ -372,12 +387,24 @@ def run_custom_trend25(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             df_map[sym] = normalize_hist_from_fetch(df)
         else:
             del df_map[sym]
+    
+    log_event("info", "custom_trend25 data fetched", {
+        "total_symbols": len(symbols),
+        "fetched_symbols": len(df_map),
+        "cache_hit_rate": fetch_summary.cache_hit_rate,
+        "fetch_elapsed_seconds": fetch_summary.elapsed_seconds
+    })
 
     rows: list[dict[str, Any]] = []
     for sym, df in df_map.items():
         item = _eval_symbol(sym, df, cfg, tuned, market_cap_map, name_map, sector_map)
         if item is not None:
             rows.append(item)
+    
+    log_event("info", "custom_trend25 symbols evaluated", {
+        "evaluated": len(df_map),
+        "passed": len(rows)
+    })
 
     rows.sort(key=lambda x: (-float(x.get("score", 0.0)), str(x.get("code", ""))))
 
@@ -390,10 +417,20 @@ def run_custom_trend25(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         top_sectors = [k for k, _ in sorted(sec_counts.items(), key=lambda kv: (-kv[1], kv[0]))[: cfg.top_n_sectors]]
         top_set = set(top_sectors)
         rows = [r for r in rows if str(r.get("industry", "") or "未知行业") in top_set]
+        
+        log_event("info", "custom_trend25 sector resonance", {
+            "top_sectors": top_sectors,
+            "after_filter": len(rows)
+        })
 
     cap_mult = float(tuned.get("capacity_mult", 1.0) or 1.0)
     final_cap = int(max(10, (cfg.limit_count if cfg.limit_count > 0 else len(rows)) * 0.25 * cap_mult))
     rows = rows[:final_cap]
+    
+    log_event("info", "custom_trend25 final result", {
+        "final_count": len(rows),
+        "capacity_mult": cap_mult
+    })
 
     return {
         "strategy_id": cfg.strategy_id,

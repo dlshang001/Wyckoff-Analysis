@@ -20,6 +20,7 @@ from postgrest.exceptions import APIError
 
 from core.constants import TABLE_STOCK_CACHE_DATA, TABLE_STOCK_CACHE_META
 from integrations.supabase_client import get_supabase_client
+from core.app_logger import log_event
 
 STOCK_CACHE_ENABLED = os.getenv("STOCK_CACHE_ENABLED", "true").strip().lower() not in {
     "0", "false", "no", "off", "disabled"
@@ -149,13 +150,24 @@ def batch_get_cache_meta(symbols: list[str], adjust: str) -> dict[str, CacheMeta
     返回: {symbol: CacheMeta}
     """
     if not STOCK_CACHE_ENABLED or not symbols:
+        log_event("info", "batch_get_cache_meta skipped", {
+            "reason": "cache_disabled" if not STOCK_CACHE_ENABLED else "no_symbols"
+        })
         return {}
     supabase = get_supabase_client()
     if supabase is None:
+        log_event("warning", "batch_get_cache_meta supabase unavailable", {})
         return {}
     result: dict[str, CacheMeta] = {}
     try:
         batch_size = 500
+        total_batches = (len(symbols) + batch_size - 1) // batch_size
+        log_event("info", "batch_get_cache_meta start", {
+            "total_symbols": len(symbols),
+            "batch_size": batch_size,
+            "total_batches": total_batches
+        })
+        
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
             resp = (
@@ -179,8 +191,16 @@ def batch_get_cache_meta(symbols: list[str], adjust: str) -> dict[str, CacheMeta
                     end_date=_parse_iso_datetime(row["end_date"]).date(),
                     updated_at=_parse_iso_datetime(row["updated_at"]),
                 )
-    except Exception:
-        pass
+        
+        log_event("info", "batch_get_cache_meta done", {
+            "total_symbols": len(symbols),
+            "cached_symbols": len(result),
+            "hit_rate": len(result) / len(symbols) if symbols else 0.0
+        })
+    except Exception as e:
+        log_event("error", "batch_get_cache_meta error", {
+            "error": str(e)
+        })
     return result
 
 
